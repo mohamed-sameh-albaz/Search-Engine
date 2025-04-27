@@ -7,7 +7,6 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.core.env.Environment;
 import org.springframework.jdbc.core.BeanPropertyRowMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
-import com.example.searchengine.Crawler.Entities.FullLinks;
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
