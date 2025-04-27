@@ -49,7 +49,7 @@ const Autocomplete = styled.div`
   background: rgba(255, 255, 255, 0.2);
   border-radius: 0 0 10px 10px;
   color: #fff;
-  display: ${props => (props.visible ? 'block' : 'none')};
+  display: ${props => (props.$visible ? 'block' : 'none')};
 `;
 
 const SearchBar = () => {
@@ -81,7 +81,7 @@ const SearchBar = () => {
         onKeyPress={handleKeyPress}
       />
       <Button onClick={handleSearch}>Go</Button>
-      <Autocomplete visible={isFocused && query.length > 0}>
+      <Autocomplete $visible={isFocused && query.length > 0}>
         <p>Suggestion 1</p>
         <p>Suggestion 2</p>
       </Autocomplete>

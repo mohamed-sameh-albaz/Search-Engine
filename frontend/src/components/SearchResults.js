@@ -1,5 +1,5 @@
 // SearchResults.js
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import styled from 'styled-components';
 import { useLocation, Link, useSearchParams } from 'react-router-dom';
 
@@ -42,6 +42,33 @@ const ResultsTitle = styled.h1`
   text-shadow: 0 0 10px rgba(155, 89, 182, 0.7);
   margin-bottom: 20px;
   color: #ffffff;
+`;
+
+const QueryAnalysis = styled.div`
+  background: rgba(155, 89, 182, 0.1);
+  padding: 15px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+`;
+
+const AnalysisTitle = styled.h2`
+  font-size: 1.2rem;
+  color: #9b59b6;
+  margin-bottom: 10px;
+`;
+
+const AnalysisList = styled.div`
+  color: rgba(255, 255, 255, 0.9);
+  margin-bottom: 10px;
+`;
+
+const AnalysisItem = styled.span`
+  background: rgba(155, 89, 182, 0.2);
+  padding: 5px 10px;
+  border-radius: 15px;
+  margin-right: 10px;
+  margin-bottom: 10px;
+  display: inline-block;
 `;
 
 const ResultsList = styled.div`
@@ -101,7 +128,7 @@ const PageNumber = styled(Link)`
   font-size: 1.2rem;
   padding: 5px 10px;
   border-radius: 5px;
-  background: ${props => (props.active ? '#9b59b6' : 'transparent')};
+  background: ${props => (props.$active ? '#9b59b6' : 'transparent')};
 
   &:hover {
     background: #9b59b6;
@@ -125,8 +152,33 @@ const SearchResults = () => {
   const query = searchParams.get('q') || '';
   const page = parseInt(searchParams.get('page')) || 1;
   const resultsPerPage = 5;
+  const [processedQuery, setProcessedQuery] = useState({ phrases: [], stemmed: [] });
 
   useEffect(() => {
+    // Fetch processed query results from backend
+    const fetchProcessedQuery = async () => {
+      try {
+        const response = await fetch(`http://localhost:8080/api/process-query?query=${encodeURIComponent(query)}`);
+        if (response.ok) {
+          const text = await response.text();
+          // Parse the response text
+          const phrasesMatch = text.match(/Phrase: \[(.*?)\]/);
+          const stemmedMatch = text.match(/Stemmed: \[(.*?)\]/);
+          
+          const phrases = phrasesMatch ? phrasesMatch[1].split(', ').filter(p => p) : [];
+          const stemmed = stemmedMatch ? stemmedMatch[1].split(', ').filter(s => s) : [];
+          
+          setProcessedQuery({ phrases, stemmed });
+        }
+      } catch (error) {
+        console.error('Error fetching processed query:', error);
+      }
+    };
+
+    if (query) {
+      fetchProcessedQuery();
+    }
+
     // Clear existing particles canvas if it exists
     const existingCanvas = document.getElementById('particles-js').querySelector('canvas');
     if (existingCanvas) {
@@ -160,7 +212,7 @@ const SearchResults = () => {
         }
       }
     });
-  }, [location.pathname]);
+  }, [query, location.pathname]);
 
   // Expanded dummy results data (10 items)
   const dummyResults = [
@@ -197,7 +249,7 @@ const SearchResults = () => {
     {
       title: `${query} Black Hole Study`,
       url: `www.blackholescience.com/${query.toLowerCase()}`,
-      description: `Research on ${query} indicates a massive black hole at the galaxy’s edge.`,
+      description: `Research on ${query} indicates a massive black hole at the galaxy's edge.`,
     },
     {
       title: `${query} Exoplanet Findings`,
@@ -233,6 +285,21 @@ const SearchResults = () => {
           <HomeLink to="/">Search Engine</HomeLink>
         </Header>
         <ResultsTitle>Search Results for: "{query}"</ResultsTitle>
+        
+        <QueryAnalysis>
+          <AnalysisTitle>Query Analysis</AnalysisTitle>
+          <AnalysisList>
+            <div>Phrases: {processedQuery.phrases.length > 0 ? processedQuery.phrases.map((phrase, index) => (
+              <AnalysisItem key={index}>{phrase}</AnalysisItem>
+            )) : <AnalysisItem>No phrases found</AnalysisItem>}</div>
+          </AnalysisList>
+          <AnalysisList>
+            <div>Stemmed Words: {processedQuery.stemmed.length > 0 ? processedQuery.stemmed.map((word, index) => (
+              <AnalysisItem key={index}>{word}</AnalysisItem>
+            )) : <AnalysisItem>No stemmed words found</AnalysisItem>}</div>
+          </AnalysisList>
+        </QueryAnalysis>
+
         <ResultsList>
           {currentResults.map((result, index) => (
             <ResultItem key={index}>
@@ -252,7 +319,7 @@ const SearchResults = () => {
             <PageNumber
               key={pageNum}
               to={`/search?q=${encodeURIComponent(query)}&page=${pageNum}`}
-              active={pageNum === page}
+              $active={pageNum === page}
             >
               {pageNum}
             </PageNumber>
