@@ -1,16 +1,19 @@
 package com.example.searchengine.Crawler.CrawlerMainProcess;
 
 import java.io.BufferedReader;
-import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileReader;
-import java.io.FileWriter;
 import java.net.URI;
 import java.net.URLEncoder;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Hashtable;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
 
-import org.apache.lucene.search.similarities.Normalization;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
@@ -73,79 +76,90 @@ public class CrawlerMainProcess {
         return null;
     }
 
-    public synchronized void crawl() {
+    public void crawl() {
         int seedLinksCount = 15;
         String urlFromSeed[] = ReadseedLinks();
         Queue<com.example.searchengine.Crawler.Entities.Document> queue = new LinkedList<>();
         Hashtable<String, com.example.searchengine.Crawler.Entities.Document> documents = new Hashtable<>();
         ConcurrentHashMap<String, com.example.searchengine.Crawler.Entities.Document> visitedUrls = new ConcurrentHashMap<>();
         List<com.example.searchengine.Crawler.Entities.Document> crawlers = new ArrayList<>();
-        crawlers = serveDataBase.getAllVisited();
-        int count = crawlers.size();
+        
         synchronized (this) {
-
+            crawlers = serveDataBase.getAllVisited();
+        }
+        
+        int count;
+        synchronized (this) {
+            count = crawlers.size();
             for (com.example.searchengine.Crawler.Entities.Document doc : crawlers) {
                 visitedUrls.put(doc.getUrl(), doc);
                 queue.add(doc);
             }
         }
+    
         int i = 0;
         while (count < 6000 && i < seedLinksCount) {
             try {
+                String seedUrl;
+                seedUrl = urlFromSeed[i++];
+                if (!visitedUrls.contains(seedUrl)) {
                 synchronized (this) {
-
-                    String seedUrl = urlFromSeed[i++];
-                    if (!visitedUrls.contains(seedUrl)) {
                         com.example.searchengine.Crawler.Entities.Document doct = new com.example.searchengine.Crawler.Entities.Document();
                         doct.setUrl(seedUrl);
                         visitedUrls.put(doct.getUrl(), doct);
                         queue.add(doct);
-                        
                     }
                 }
-                while (queue.size() > 0 && count < 6000) {
-                    
+    
+                while (queue.size() > 0) {
+                    com.example.searchengine.Crawler.Entities.Document docElement;
                     String CurrentURL;
-                    com.example.searchengine.Crawler.Entities.Document docElement = new com.example.searchengine.Crawler.Entities.Document();
-                    
-                    Document doc = null;
+    
+                    if (queue.size() == 0 || count >= 6000) break;
                     synchronized (this) {
                         docElement = queue.poll();
                         CurrentURL = docElement.getUrl();
                         CurrentURL = CurrentURL.replace(" ", "%20").replace("\"", "%22").replace(",", "%2C");
                     }
-                    synchronized (this) {
+    
                         
-                        
-                        doc = Jsoup.connect(CurrentURL).get();
+                    Document doc;
+                    doc = Jsoup.connect(CurrentURL).get();
+                    String title = doc.title();
+                    String content = doc.html();
                         docElement.setUrl(CurrentURL);
-                        docElement.setTitle(doc.title());
-                        docElement.setContent(doc.html());
-                    }
-                    synchronized (this) {
-                        // visitedUrls.remove(CurrentURL);
-
-                        if (docElement.getStatus() == null) {
+                        docElement.setTitle(title);
+                        docElement.setContent(content);
+    
+                    if (docElement.getStatus() == null) {
+                        synchronized (this) {
                             docElement.setStatus("visited");
                             serveDataBase.saveToDatabase(docElement);
                             System.out.println("added to data base " + docElement.getUrl());
                             count++;
                         }
                     }
+    
                     URI parentUrl = new URI(CurrentURL);
                     Elements links = doc.getElementsByTag("a");
+    
                     for (Element link : links) {
+                        synchronized (this) {
+                        String finalUrl = null;
                         String Linkurl = link.attr("href");
                         Linkurl = Linkurl.replace(" ", "%20").replace("\"", "%22").replace(",", "%2C");
                         URI resolvedUrI = new URI(Linkurl);
                         resolvedUrI = parentUrl.resolve(resolvedUrI);
-                        String finalUrl = Normalization(resolvedUrI);
-                        synchronized (this) {
+                        finalUrl = Normalization(resolvedUrI);
+                        if (!visitedUrls.containsKey(finalUrl) && RobotsCheck.isAllowed(finalUrl)) {
+                        
 
-                            if (!visitedUrls.containsKey(finalUrl) && RobotsCheck.isAllowed(finalUrl)) {
                                 System.out.println("Added to visited URLs: " + finalUrl);
                                 com.example.searchengine.Crawler.Entities.Document docSub = new com.example.searchengine.Crawler.Entities.Document();
                                 doc = Jsoup.connect(finalUrl).get();
+                                String titlechild = doc.title();
+                                String contentchild = doc.html();
+  
                                 docSub.setUrl(finalUrl);
                                 docSub.setTitle(doc.title());
                                 docSub.setContent(doc.html());
@@ -153,19 +167,26 @@ public class CrawlerMainProcess {
                                 serveDataBase.saveToDatabase(docSub);
                                 visitedUrls.put(finalUrl, docSub);
                                 queue.add(docSub);
-
+                                count++;  // also increment count here
+                                }
+                            
+                            else
+                            {
+                                continue; // Skip to the next iteration if the URL is already visited
                             }
                         }
-
+                        }
+                        
                     }
                 }
-
-            } catch (Exception ex) {
+    
+            catch (Exception ex) {
                 System.out.println("there is an ERROR" + ex);
             }
             System.out.println("Crawling completed for URL: https://www.wikipedia.com");
         }
     }
+    
 
     // normalization method to remove the duplicate links and to remove the
     // unnecessary parts of the URL

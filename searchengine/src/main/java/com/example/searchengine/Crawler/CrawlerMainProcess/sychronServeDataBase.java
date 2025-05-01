@@ -10,7 +10,7 @@ import com.example.searchengine.Crawler.Repository.DocumentsRepository;
 import lombok.AllArgsConstructor;
 @Service
 @AllArgsConstructor
-public class ServeDataBase {
+public class sychronServeDataBase {
     DocumentsRepository documentsRepository;
     public Object saveToDatabase(Document document) {
    // Save the document to the database using the repository
