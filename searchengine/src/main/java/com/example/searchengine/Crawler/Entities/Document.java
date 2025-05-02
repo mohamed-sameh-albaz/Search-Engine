@@ -42,7 +42,8 @@ public class Document {
 
     @Column(name = "last_indexed")
     private LocalDateTime lastIndexed;
-
+    @Column(name = "parent_doc_id")
+    private Long parentDocId;
     @PrePersist
     protected void onCreate() {
         createdAt = LocalDateTime.now();

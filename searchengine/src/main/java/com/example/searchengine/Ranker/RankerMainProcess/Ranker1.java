@@ -2,6 +2,12 @@ package com.example.searchengine.Ranker.RankerMainProcess;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Map;
+// import com.example.searchengine.Indexer.IndexerService;
+import com.example.searchengine.Crawler.CrawlerMainProcess.CrawlerMainProcess;
+import com.example.searchengine.Crawler.Repository.DocumentsRepository;
+import com.example.searchengine.Crawler.Repository.RelatedLinksRepository;
+import com.example.searchengine.Crawler.Repository.RelatedLinksRepository;
+import com.example.searchengine.Crawler.Repository.DocumentsRepository;
 public class Ranker1 {
 
    
@@ -16,19 +22,26 @@ public class Ranker1 {
     double[] pageRankScores;
     double dampingFactor = 0.85; // Damping factor for PageRank algorithm
     int maxIterations = 100; 
-    double [][] adjacencyMatrix;
+    int [][] adjacencyMatrix;
     long [] OutDegree;
     //==========================================================================
+    double [] finalRankScores;
+    int [] finalDocs;
+    //===========================================================================
+    DocumentsRepository DocumentsRepository;
+    RelatedLinksRepository RelatedLinksRepository;
+    CrawlerMainProcess crawlerMainProcess = new CrawlerMainProcess(DocumentsRepository,RelatedLinksRepository);
+    // IndexerService indexerService = new IndexerService();
+    public Ranker1() {
+        // Map<String, Map<Integer, Integer>> index = indexerService.getIndex();
+        // Long DocTerms[] = indexerService.getDocTerms();
+        // int[][] adjacencyMatrix = crawlerMainProcess.relationMatrix();
 
-   double [] finalRankScores;
-   int [] finalDocs;
-   //===========================================================================
-    public Ranker1(Map<String, Map<Integer, Integer>> index, long [] DocTerms, double [][] adjacencyMatrix) {
-        this.index = index;
-        this.DocTerms = DocTerms;
-        this.numDocs = DocTerms.length;
-        this.adjacencyMatrix = adjacencyMatrix;
-
+        // this.index = index;
+        // this.DocTerms = DocTerms;
+        // this.numDocs = DocTerms.length;
+        // this.adjacencyMatrix = adjacencyMatrix;
+        
         //=========================================================================
         //calc doc terms
 
@@ -46,7 +59,7 @@ public class Ranker1 {
         }
         this.OutDegree = new long[(int) numDocs];
         for (int i = 0; i < numDocs; i++) {
-            OutDegree[i] = getOutDegree(adjacencyMatrix, i); // Calculate out-degree for each node
+            // OutDegree[i] = getOutDegree(adjacencyMatrix, i); // Calculate out-degree for each node
         }
         //=========================================================================
     }

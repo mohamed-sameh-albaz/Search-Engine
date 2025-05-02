@@ -13,5 +13,6 @@ public interface DocumentsRepository extends JpaRepository<Document, Long> {
     List<String> getUrls(); 
     @Query("SELECT d.content FROM Document d")
     List<String> getContents();
-
+    @Query("Select url, content, title from Document")
+    List<Object[]> getUrlsandContents(); // Custom query to get URLs and contents
 }

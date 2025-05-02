@@ -1,17 +1,24 @@
 package com.example.searchengine.Crawler.CrawlerMainProcess;
-
-import java.util.*;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 import org.springframework.stereotype.Service;
 
 import com.example.searchengine.Crawler.Entities.Document;
+import com.example.searchengine.Crawler.Entities.RelatedLinks;
+import com.example.searchengine.Crawler.Entities.RelatedLinksID;
 import com.example.searchengine.Crawler.Repository.DocumentsRepository;
+import com.example.searchengine.Crawler.Repository.RelatedLinksRepository;
 
 import lombok.AllArgsConstructor;
+
+
 @Service
 @AllArgsConstructor
 public class ServeDataBase {
     DocumentsRepository documentsRepository;
+    RelatedLinksRepository relatedLinksRepository;
     public Object saveToDatabase(Document document) {
    // Save the document to the database using the repository
         return documentsRepository.save(document);
@@ -42,6 +49,13 @@ public class ServeDataBase {
         // Update the document in the database using the repository
         documentsRepository.save(document);
     }
-    
+    public void saveRelatedLinks(String parentDocid, String childDocid) {
+        // Create a new RelatedLinks entity and save it to the database
+        RelatedLinksID relatedLinksID = new RelatedLinksID(parentDocid, childDocid);
+        RelatedLinks relatedLinks = new RelatedLinks(relatedLinksID);
+        relatedLinksRepository.save(relatedLinks);
+    }
 }
+
+    
 
