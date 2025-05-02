@@ -300,4 +300,19 @@ public class IndexerService {
         return docCnt;
     }
 
+    // This function creates a frequency array from the document count map.
+    // The index is the document ID, and the value is the word count.
+    public long[] getDocumentCntArray() {
+        Map<Long, Long> docCnt = getDocumentCnt();
+        if (docCnt == null || docCnt.isEmpty()) {
+            return new long[0];
+        }
+        long maxId = Collections.max(docCnt.keySet());
+        long[] freqArray = new long[(int) (maxId + 1)];
+        for (Map.Entry<Long, Long> entry : docCnt.entrySet()) {
+            freqArray[entry.getKey().intValue()] = entry.getValue();
+        }
+        return freqArray;
+    }
+
 }

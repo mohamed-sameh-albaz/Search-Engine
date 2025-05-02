@@ -41,7 +41,7 @@ public class Ranker1 {
     // IndexerService indexerService = new IndexerService();
     public Ranker1() {
         // Map<String, Map<Integer, Integer>> index = indexerService.getIndex();
-        // Long DocTerms[] = indexerService.getDocTerms();
+        // long DocTerms[] = indexerService.getDocTerms();
         // int[][] adjacencyMatrix = crawlerMainProcess.relationMatrix();
 
         // this.index = index;
