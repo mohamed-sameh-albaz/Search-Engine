@@ -10,13 +10,16 @@ import org.springframework.beans.factory.annotation.Autowired;
 import com.example.searchengine.Crawler.CrawlerMainProcess.CrawlerMainProcess;
 import com.example.searchengine.Crawler.Repository.DocumentsRepository;
 import com.example.searchengine.Crawler.Repository.RelatedLinksRepository;
+import com.example.searchengine.Indexer.Service.IndexerService;
 import com.example.searchengine.Crawler.Repository.RelatedLinksRepository;
 import com.example.searchengine.Crawler.Repository.DocumentsRepository;
+import com.example.searchengine.Crawler.CrawlerMainProcess.CrawlerMainProcess;
+import com.example.searchengine.Indexer.Service.IndexerService; 
 
 public class Ranker1 {
 
     long[] FreqSearchTerms;
-    Map<String, Map<Integer, Integer>> index;
+    Map<String, Map<Long, Integer>> index;
     long[] DocTerms = new long[6000]; // Assuming a maximum of 6000 documents
     long[][] DocTermsFreqs;
     long numDocs = 6000;
@@ -38,16 +41,17 @@ public class Ranker1 {
     @Autowired
     CrawlerMainProcess crawlerMainProcess;
 
-    // IndexerService indexerService = new IndexerService();
+    @Autowired
+    IndexerService indexerService;
     public Ranker1() {
-        // Map<String, Map<Integer, Integer>> index = indexerService.getIndex();
-        // long DocTerms[] = indexerService.getDocTerms();
-        // int[][] adjacencyMatrix = crawlerMainProcess.relationMatrix();
+         Map<String, Map<Long, Integer>> index = indexerService.getInvertedIndex()
+         long DocTerms[] = indexerService.getDocumentCntArray();
+         int[][] adjacencyMatrix = crawlerMainProcess.relationMatrix();
 
-        // this.index = index;
-        // this.DocTerms = DocTerms;
-        // this.numDocs = DocTerms.length;
-        // this.adjacencyMatrix = adjacencyMatrix;
+         this.index = index;
+         this.DocTerms = DocTerms;
+         this.numDocs = DocTerms.length;
+         this.adjacencyMatrix = adjacencyMatrix;
 
         // =========================================================================
         // calc doc terms
@@ -79,7 +83,7 @@ public class Ranker1 {
         this.numTerms = searchTerms.length;
         for (int i = 0; i < numDocs; i++) {
             for (int j = 0; j < numTerms; j++) {
-                Map<Integer, Integer> termFreqs = index.get(searchTerms[j]);
+                Map<Long, Integer> termFreqs = index.get(searchTerms[j]);
                 if (termFreqs == null) {
                     DocTermsFreqs[i][j] = 0;
                 } else {
