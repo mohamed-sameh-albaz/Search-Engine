@@ -1,53 +1,85 @@
 package com.example.searchengine;
 
+import com.example.searchengine.Crawler.Entities.Document;
+
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.core.env.Environment;
-import org.springframework.jdbc.core.BeanPropertyRowMapper;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
+
+import com.example.searchengine.Crawler.Repository.DocumentRepository;
+import com.example.searchengine.Indexer.Service.DatabaseMaintenanceService;
+import com.example.searchengine.Indexer.Service.IndexerService;
+import com.example.searchengine.Indexer.Service.PreIndexer;
+
 import javax.sql.DataSource;
-import java.sql.Connection;
-import java.sql.SQLException;
+import java.util.HashMap;
+import java.util.Map;
+
+import org.springframework.data.domain.Page;
+import io.github.cdimascio.dotenv.Dotenv;
+import jakarta.transaction.Transactional;
 
 @SpringBootApplication
 public class SearchengineApplication implements CommandLineRunner {
 
     @Autowired
-    private DataSource dataSource;
+    private IndexerService indexerService;
+
     @Autowired
-    private Environment environment;
+    private DatabaseMaintenanceService maintenanceService;
+
     @Autowired
-    private JdbcTemplate jdbcTemplate;
+    private DocumentRepository documentRepository;
+
+    @Autowired
+    private PreIndexer preIndexer;
 
     public static void main(String[] args) {
+        Dotenv dotenv = Dotenv.configure()
+                .directory(".")
+                .ignoreIfMissing()
+                .load();
+
+        dotenv.entries().forEach(entry -> System.setProperty(entry.getKey(), entry.getValue()));
         SpringApplication.run(SearchengineApplication.class, args);
     }
 
     @Override
-    public void run(String... args) {
-        // Test database connection
-        try (Connection connection = dataSource.getConnection()) {
-            System.out.println("Connected to database successfully...........");
-        } catch (SQLException e) {
-            System.err.println("Failed to connect to database: " + e.getMessage());
-            return; // Exit if database connection fails
+    @Transactional
+    public void run(String... args) throws Exception {
+        Map<String, String> documentsToIndex = fetchDocumentsForIndexing();
+        // maintenanceService.vacuumDatabase();
+        if (!documentsToIndex.isEmpty()) {
+            System.out.println("Re-indexing " + documentsToIndex.size() + "documents...");
+            // indexerService.buildIndex(documentsToIndex);
+        } else {
+            System.out.println("No documents found to re-index.");
         }
+    }
 
-        // Print server port
-        String port = environment.getProperty("server.port", "8080");
-        System.out.println("Listening on port: " + port + ".....");
+    private Map<String, String> fetchDocumentsForIndexing() {
+        Map<String, String> documentsToIndex = new HashMap<>();
+        int pageSize = 20;
+        int page = 0;
+        boolean hasMore = true;
 
-        // Query database and print result
-        try {
-            // String sql = "SELECT id, title FROM links WHERE id = ?";
-            // FullLinks result = jdbcTemplate.queryForObject(sql, new BeanPropertyRowMapper<>(FullLinks.class), 1);
-            // System.out.println("Query result: ID = " + result.getId() + ", Title = " + result.getTitle());
-        } catch (org.springframework.dao.EmptyResultDataAccessException e) {
-            System.out.println("No link found for ID = 1");
-        } catch (org.springframework.dao.DataAccessException e) {
-            System.err.println("Database query failed: " + e.getMessage());
+        // while (hasMore) {
+        Page<Document> documentPage = documentRepository.findAll(PageRequest.of(page,
+                pageSize));
+        for (Document doc : documentPage.getContent()) {
+            if (doc.getUrl() != null && doc.getContent() != null) {
+                documentsToIndex.put(doc.getUrl(), doc.getContent());
+            }
         }
+        hasMore = documentPage.hasNext();
+        page++;
+        System.out.println(documentsToIndex.size());
+        // }
+
+        return documentsToIndex;
     }
 }
