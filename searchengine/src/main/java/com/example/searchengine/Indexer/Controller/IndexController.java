@@ -43,4 +43,15 @@ public class IndexController {
     public Word postMethodName(@RequestBody Word word) {
         return wordRepository.save(word);
     }
+
+    @GetMapping("/invertedIndex")
+    public Map<String, Map<Long, Integer>> getMethodName() {
+        return indexService.getInvertedIndex();
+    }
+
+    @GetMapping("/documentWords")
+    public Map<Long, Long> getDocumentWordsCnt() {
+        return indexService.getDocumentCnt();
+    }
+
 }

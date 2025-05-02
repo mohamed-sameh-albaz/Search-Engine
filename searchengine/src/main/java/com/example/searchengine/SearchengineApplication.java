@@ -52,10 +52,10 @@ public class SearchengineApplication implements CommandLineRunner {
     @Transactional
     public void run(String... args) throws Exception {
         Map<String, String> documentsToIndex = fetchDocumentsForIndexing();
-        maintenanceService.vacuumDatabase();
+        // maintenanceService.vacuumDatabase();
         if (!documentsToIndex.isEmpty()) {
             System.out.println("Re-indexing " + documentsToIndex.size() + "documents...");
-            indexerService.buildIndex(documentsToIndex);
+            // indexerService.buildIndex(documentsToIndex);
         } else {
             System.out.println("No documents found to re-index.");
         }
@@ -63,7 +63,7 @@ public class SearchengineApplication implements CommandLineRunner {
 
     private Map<String, String> fetchDocumentsForIndexing() {
         Map<String, String> documentsToIndex = new HashMap<>();
-        int pageSize = 100;
+        int pageSize = 20;
         int page = 0;
         boolean hasMore = true;
 

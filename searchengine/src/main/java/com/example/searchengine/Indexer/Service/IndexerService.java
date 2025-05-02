@@ -59,6 +59,7 @@ public class IndexerService {
         // String[] words = text.split("\\s+");
         List<String> words = preIndexer.tokenize(text);
         words = preIndexer.removeStopWords(words);
+        words = preIndexer.Stemming(words);
         for (String word : words) {
             WordInfo info = wordInfo.computeIfAbsent(word, k -> new WordInfo());
             info.addFrequency(tag, 1);
@@ -71,6 +72,7 @@ public class IndexerService {
         String cleanedHTML = preIndexer.cleanHTML(HTML);
         List<String> words = preIndexer.tokenize(cleanedHTML);
         words = preIndexer.removeStopWords(words);
+        words = preIndexer.Stemming(words);
         Map<String, Long> wordFreq = new HashMap<>();
         for (String word : words) {
             wordFreq.put(word, wordFreq.getOrDefault(word, 0L) + 1L);
@@ -239,4 +241,63 @@ public class IndexerService {
         }
         return index;
     }
+
+    // word, (doc_id, freqOfWord)
+    public Map<String, Map<Long, Integer>> getInvertedIndex() {
+        Map<String, Map<Long, Integer>> index = new HashMap<>();
+        int pageSize = 10;
+        int page = 0;
+        boolean hasMore = true;
+
+        while (hasMore) {
+            List<Word> words = wordRepository.findAll(PageRequest.of(page, pageSize)).getContent();
+            System.out.println("ssssssssss" + words.size());
+            if (words.isEmpty()) {
+                hasMore = false;
+                continue;
+            }
+
+            for (Word word : words) {
+                List<InvertedIndex> mappings = invertedIndexRepository.findByWord(word,
+                        PageRequest.of(0, Integer.MAX_VALUE));
+
+                for (InvertedIndex mapping : mappings) {
+                    Map<Long, Integer> docFreq = new HashMap<>();
+
+                    docFreq.put(mapping.getDocument().getId(), mapping.getFrequency());
+                    index.put(mapping.getWord().getWord(), docFreq);
+                }
+
+            }
+            page++;
+        }
+        return index;
+    }
+
+    // (doc_id, #words)
+    public Map<Long, Long> getDocumentCnt() {
+        Map<Long, Long> docCnt = new HashMap<>();
+        int pageSize = 200;
+        int page = 0;
+        boolean hasMore = true;
+        while (hasMore) {
+            List<Document> docs = documentRepository.findAll(PageRequest.of(page, pageSize)).getContent();
+            if (docs.isEmpty()) {
+                hasMore = false;
+                continue;
+            }
+            for (Document doc : docs) {
+                Long size = 0L;
+                String cleanedHTML = preIndexer.cleanHTML(doc.getContent());
+                List<String> words = preIndexer.tokenize(cleanedHTML);
+                words = preIndexer.removeStopWords(words);
+                words = preIndexer.Stemming(words);
+                size = (long) words.size();
+                docCnt.put(doc.getId(), size);
+            }
+            page++;
+        }
+        return docCnt;
+    }
+
 }
