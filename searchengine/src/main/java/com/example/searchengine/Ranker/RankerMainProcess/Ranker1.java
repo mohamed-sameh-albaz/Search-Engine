@@ -1,36 +1,43 @@
 package com.example.searchengine.Ranker.RankerMainProcess;
+
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Map;
+
+import org.springframework.beans.factory.annotation.Autowired;
+
 // import com.example.searchengine.Indexer.IndexerService;
 import com.example.searchengine.Crawler.CrawlerMainProcess.CrawlerMainProcess;
 import com.example.searchengine.Crawler.Repository.DocumentsRepository;
 import com.example.searchengine.Crawler.Repository.RelatedLinksRepository;
 import com.example.searchengine.Crawler.Repository.RelatedLinksRepository;
 import com.example.searchengine.Crawler.Repository.DocumentsRepository;
+
 public class Ranker1 {
 
-   
     long[] FreqSearchTerms;
     Map<String, Map<Integer, Integer>> index;
-    long[] DocTerms= new long[6000]; // Assuming a maximum of 6000 documents
-    long [][] DocTermsFreqs;
-    long numDocs=6000;
+    long[] DocTerms = new long[6000]; // Assuming a maximum of 6000 documents
+    long[][] DocTermsFreqs;
+    long numDocs = 6000;
     long numTerms;
-    double [] RelevanceScore;
-    //==========================================================================
+    double[] RelevanceScore;
+    // ==========================================================================
     double[] pageRankScores;
     double dampingFactor = 0.85; // Damping factor for PageRank algorithm
-    int maxIterations = 100; 
-    int [][] adjacencyMatrix;
-    long [] OutDegree;
-    //==========================================================================
-    double [] finalRankScores;
-    int [] finalDocs;
-    //===========================================================================
+    int maxIterations = 100;
+    int[][] adjacencyMatrix;
+    long[] OutDegree;
+    // ==========================================================================
+    double[] finalRankScores;
+    int[] finalDocs;
+    // ===========================================================================
     DocumentsRepository DocumentsRepository;
     RelatedLinksRepository RelatedLinksRepository;
-    CrawlerMainProcess crawlerMainProcess = new CrawlerMainProcess(DocumentsRepository,RelatedLinksRepository);
+
+    @Autowired
+    CrawlerMainProcess crawlerMainProcess;
+
     // IndexerService indexerService = new IndexerService();
     public Ranker1() {
         // Map<String, Map<Integer, Integer>> index = indexerService.getIndex();
@@ -41,59 +48,61 @@ public class Ranker1 {
         // this.DocTerms = DocTerms;
         // this.numDocs = DocTerms.length;
         // this.adjacencyMatrix = adjacencyMatrix;
-        
-        //=========================================================================
-        //calc doc terms
+
+        // =========================================================================
+        // calc doc terms
 
         // for (Map<Integer, Integer> docs : index.values()) {
-        //     for (Map.Entry<Integer, Integer> docEntry : docs.entrySet()) {
-        //         int docId = docEntry.getKey();
-        //         int freq = docEntry.getValue();
-        //         DocTerms[docId] += freq; // Increment the term frequency for the document
-        //     }
+        // for (Map.Entry<Integer, Integer> docEntry : docs.entrySet()) {
+        // int docId = docEntry.getKey();
+        // int freq = docEntry.getValue();
+        // DocTerms[docId] += freq; // Increment the term frequency for the document
         // }
-        //=========================================================================
+        // }
+        // =========================================================================
         this.pageRankScores = new double[(int) numDocs];
         for (int i = 0; i < numDocs; i++) {
             pageRankScores[i] = 1.0 / numDocs; // Initialize scores uniformly
         }
         this.OutDegree = new long[(int) numDocs];
         for (int i = 0; i < numDocs; i++) {
-            // OutDegree[i] = getOutDegree(adjacencyMatrix, i); // Calculate out-degree for each node
+            // OutDegree[i] = getOutDegree(adjacencyMatrix, i); // Calculate out-degree for
+            // each node
         }
-        //=========================================================================
+        // =========================================================================
     }
 
-    public void calculateRelevanceScore(String [] searchTerms) {
+    public void calculateRelevanceScore(String[] searchTerms) {
         RelevanceScore = new double[(int) numDocs];
         this.FreqSearchTerms = new long[searchTerms.length];
         this.DocTermsFreqs = new long[DocTerms.length][searchTerms.length];
         this.numTerms = searchTerms.length;
-        for (int i=0;i<numDocs;i++){
-            for (int j=0;j<numTerms;j++){
+        for (int i = 0; i < numDocs; i++) {
+            for (int j = 0; j < numTerms; j++) {
                 Map<Integer, Integer> termFreqs = index.get(searchTerms[j]);
                 if (termFreqs == null) {
                     DocTermsFreqs[i][j] = 0;
                 } else {
                     DocTermsFreqs[i][j] = termFreqs.getOrDefault(i, 0);
                 }
-                if (DocTermsFreqs[i][j]>0)
-                  {
-                    FreqSearchTerms[j] ++;
-                  }  
+                if (DocTermsFreqs[i][j] > 0) {
+                    FreqSearchTerms[j]++;
+                }
             }
         }
-        for (int i=0;i<numDocs;i++){
+        for (int i = 0; i < numDocs; i++) {
             RelevanceScore[i] = 0;
-            for (int j=0;j<numTerms;j++){
-                if (DocTermsFreqs[i][j]>0){
-                    RelevanceScore[i] += (((double)DocTermsFreqs[i][j]/(DocTerms[i]==0?1:(double)DocTerms[i])) * (Math.log((double)numDocs/(FreqSearchTerms[j]==0 ? 1:(double)FreqSearchTerms[j] ))));
+            for (int j = 0; j < numTerms; j++) {
+                if (DocTermsFreqs[i][j] > 0) {
+                    RelevanceScore[i] += (((double) DocTermsFreqs[i][j] / (DocTerms[i] == 0 ? 1 : (double) DocTerms[i]))
+                            * (Math.log(
+                                    (double) numDocs / (FreqSearchTerms[j] == 0 ? 1 : (double) FreqSearchTerms[j]))));
                 }
             }
         }
     }
 
-    //===========================================================================
+    // ===========================================================================
     public void calculatePageRank() {
         for (int iteration = 0; iteration < maxIterations; iteration++) {
             double[] newPageRankScores = new double[(int) numDocs];
@@ -123,63 +132,60 @@ public class Ranker1 {
         return pageRankScores;
     }
 
-    //===========================================================================
+    // ===========================================================================
 
     public double[] getRelevanceScore() {
         return RelevanceScore;
     }
 
-   public void calculateFinalRank(String [] searchTerms) {
+    public void calculateFinalRank(String[] searchTerms) {
 
         calculateRelevanceScore(searchTerms);
-        calculatePageRank(); 
+        calculatePageRank();
         finalRankScores = new double[(int) numDocs];
-        for (int i=0;i<numDocs;i++){
-            finalRankScores[i] = 0.7*RelevanceScore[i] + 0.3*pageRankScores[i];
+        for (int i = 0; i < numDocs; i++) {
+            finalRankScores[i] = 0.7 * RelevanceScore[i] + 0.3 * pageRankScores[i];
         }
     }
 
     public double[] getFinalRankScores() {
         return finalRankScores;
-   }
-
-   public void generateFinalDocs(String [] searchTerms) {
-
-    calculateFinalRank(searchTerms);
-    Pair[] pairs = new Pair[(int) numDocs];  
-    for (int i = 0; i < numDocs; i++) {
-        pairs[i] = new Pair((int) finalRankScores[i], i);
     }
-     Arrays.sort(pairs, new Comparator<Pair>() {
+
+    public void generateFinalDocs(String[] searchTerms) {
+
+        calculateFinalRank(searchTerms);
+        Pair[] pairs = new Pair[(int) numDocs];
+        for (int i = 0; i < numDocs; i++) {
+            pairs[i] = new Pair((int) finalRankScores[i], i);
+        }
+        Arrays.sort(pairs, new Comparator<Pair>() {
             @Override
             public int compare(Pair p1, Pair p2) {
-                return Integer.compare(p2.value, p1.value); 
+                return Integer.compare(p2.value, p1.value);
             }
         });
         finalDocs = new int[(int) numDocs];
         for (int i = 0; i < numDocs; i++) {
             finalDocs[i] = pairs[i].index;
         }
-   }
+    }
 
-    public int[] getFinalDocs(String [] searchTerms) {
+    public int[] getFinalDocs(String[] searchTerms) {
 
         generateFinalDocs(searchTerms);
         return finalDocs;
     }
-    
-     //==========================================================================
- 
 
-   
-   static class Pair {
-    int value;
-    int index;
+    // ==========================================================================
 
-    Pair(int value, int index) {
-        this.value = value;
-        this.index = index;
+    static class Pair {
+        int value;
+        int index;
+
+        Pair(int value, int index) {
+            this.value = value;
+            this.index = index;
+        }
     }
 }
-}
-

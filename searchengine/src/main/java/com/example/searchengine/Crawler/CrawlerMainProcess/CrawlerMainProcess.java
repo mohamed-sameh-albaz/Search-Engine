@@ -43,11 +43,13 @@ public class CrawlerMainProcess {
     private static final int MAX_DOCUMENTS = 6000; // Configurable limit
     private static boolean stopFlag = false;
     Thread[] threads;
-//    public CrawlerMainProcess(DocumentsRepository documentsRepository,
-//             RelatedLinksRepository relatedLinksRepository) {
-//         this.documentsRepository = documentsRepository;
-//         this.relatedLinksRepository = relatedLinksRepository;
-//     }
+
+    // CrawlerMainProcess(DocumentsRepository documentsRepository,
+    // RelatedLinksRepository relatedLinksRepository) {
+    // this.documentsRepository = documentsRepository;
+    // this.relatedLinksRepository = relatedLinksRepository;
+    // }
+
     // private int seedLinksCount = 0;i n?
     @PostMapping
     public void startCrawling(@RequestParam(required = true, defaultValue = "0") int thread_num) {
@@ -184,20 +186,20 @@ public class CrawlerMainProcess {
                             doc = Jsoup.connect(finalUrl).get();
                             String titlechild = doc.title();
                             String contentchild = doc.html();
-        
-                                docSub.setUrl(finalUrl);
-                                docSub.setTitle(doc.title());
-                                docSub.setContent(doc.html());
-                                docSub.setStatus("visited");
-                                docSub.setParentDocId(docElement.getId());
-                                try {
-                                    
+
+                            docSub.setUrl(finalUrl);
+                            docSub.setTitle(doc.title());
+                            docSub.setContent(doc.html());
+                            docSub.setStatus("visited");
+                            docSub.setParentDocId(docElement.getId());
+                            try {
+
                                 serveDataBase.saveToDatabase(docSub);
                                 int newcount = count.incrementAndGet();
-                                    if (newcount >= MAX_DOCUMENTS) {
-                                        close();
-                                        return;
-                                    }
+                                if (newcount >= MAX_DOCUMENTS) {
+                                    close();
+                                    return;
+                                }
                                 visitedUrls.put(finalUrl, docSub);
                                 queue.add(docSub);
                             } catch (Exception e) {
@@ -225,10 +227,10 @@ public class CrawlerMainProcess {
     public void close() {
         if (!stopFlag) {
             stopFlag = true;
-        for (int i = 0; i < threads.length; i++) {
-            threads[i].interrupt();
+            for (int i = 0; i < threads.length; i++) {
+                threads[i].interrupt();
+            }
         }
-    }
     }
 
     // normalization method to remove the duplicate links and to remove the
@@ -309,17 +311,20 @@ public class CrawlerMainProcess {
         // Add the relationship to the map
 
     }
+
     public int[][] relationMatrix() {
         Map<Long, Map<Long, Integer>> relationMap = relationBetweenDocs(); // Get the relationship map
         int size = 6000;
         int[][] matrix = new int[size][size];
         for (Map.Entry<Long, Map<Long, Integer>> parentEntry : relationMap.entrySet()) {
             Long parentId = parentEntry.getKey();
-            if (parentId == null || parentId < 0 || parentId >= size) continue;
+            if (parentId == null || parentId < 0 || parentId >= size)
+                continue;
             Map<Long, Integer> children = parentEntry.getValue();
             for (Map.Entry<Long, Integer> childEntry : children.entrySet()) {
                 Long childId = childEntry.getKey();
-                if (childId == null || childId < 0 || childId >= size) continue;
+                if (childId == null || childId < 0 || childId >= size)
+                    continue;
                 matrix[parentId.intValue()][childId.intValue()] = 1;
             }
         }
