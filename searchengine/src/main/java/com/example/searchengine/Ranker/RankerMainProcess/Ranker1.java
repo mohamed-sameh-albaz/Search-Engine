@@ -44,7 +44,7 @@ public class Ranker1 {
     @Autowired
     IndexerService indexerService;
     public Ranker1() {
-         Map<String, Map<Long, Integer>> index = indexerService.getInvertedIndex()
+         Map<String, Map<Long, Integer>> index = indexerService.getInvertedIndex();
          long DocTerms[] = indexerService.getDocumentCntArray();
          int[][] adjacencyMatrix = crawlerMainProcess.relationMatrix();
 
