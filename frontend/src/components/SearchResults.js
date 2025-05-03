@@ -4,8 +4,6 @@ import styled from 'styled-components';
 import { useLocation, useNavigate, Link } from 'react-router-dom';
 import axios from 'axios';
 import SearchBar from './Searchbar';
-import Header from './Header';
-import Footer from './Footer';
 
 const ResultsContainer = styled.div`
   min-height: 100vh;
@@ -77,6 +75,7 @@ const ResultItem = styled.div`
   padding: 20px;
   transition: all 0.2s ease;
   border-left: 3px solid rgba(155, 89, 182, 0.7);
+  overflow: hidden;
 
   &:hover {
     background: rgba(255, 255, 255, 0.08);
@@ -104,6 +103,18 @@ const ResultUrl = styled.div`
   margin-bottom: 10px;
   display: flex;
   align-items: center;
+  word-break: break-all;
+  overflow-wrap: break-word;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  @media (max-width: 600px) {
+    flex-direction: column;
+    align-items: flex-start;
+    white-space: normal;
+  }
 `;
 
 const ResultSnippet = styled.p`
@@ -188,6 +199,76 @@ const PageButton = styled.button`
   }
 `;
 
+const SuggestionsContainer = styled.div`
+  margin: 10px 0 20px;
+  padding: 10px;
+  background-color: #f5f8fa;
+  border-radius: 8px;
+`;
+
+const SuggestionTitle = styled.div`
+  font-weight: 500;
+  margin-bottom: 8px;
+  color: #5f6368;
+`;
+
+const SuggestionsWrapper = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+`;
+
+const SuggestionButton = styled.button`
+  background-color: #fff;
+  border: 1px solid #dadce0;
+  border-radius: 16px;
+  color: #1a0dab;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 6px 12px;
+  transition: background-color 0.2s;
+  
+  &:hover {
+    background-color: #f1f3f4;
+    text-decoration: underline;
+  }
+`;
+
+const RankingInfoIcon = styled.span`
+  background-color: #1a73e8;
+  color: white;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  margin-left: 6px;
+  cursor: help;
+`;
+
+const RankingInfoTooltip = styled.div`
+  position: relative;
+  display: inline-block;
+  
+  &:hover::after {
+    content: attr(title);
+    position: absolute;
+    background: rgba(0, 0, 0, 0.8);
+    color: white;
+    padding: 10px;
+    border-radius: 4px;
+    width: 300px;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 100;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+`;
+
 const highlightText = (text, keywords) => {
   if (!keywords || !keywords.length) return text;
   
@@ -210,6 +291,16 @@ const SearchResults = () => {
   const [currentPage, setCurrentPage] = useState(1);
   const [loadTime, setLoadTime] = useState(null);
   const [operator, setOperator] = useState(null);
+  const [suggestedQueries, setSuggestedQueries] = useState([]);
+  const [rankingFactors, setRankingFactors] = useState({});
+  const [sessionId, setSessionId] = useState(null);
+  const [paginationInfo, setPaginationInfo] = useState({
+    totalPages: 0,
+    hasNextPage: false,
+    hasPreviousPage: false,
+    startItem: 0,
+    endItem: 0
+  });
   const resultsPerPage = 10;
   
   const location = useLocation();
@@ -217,6 +308,7 @@ const SearchResults = () => {
   const queryParams = new URLSearchParams(location.search);
   const query = queryParams.get('q') || '';
   const page = parseInt(queryParams.get('page')) || 1;
+  const searchSessionId = queryParams.get('sid') || null;
 
   useEffect(() => {
     if (!query) {
@@ -224,11 +316,25 @@ const SearchResults = () => {
       return;
     }
     
+    // Reset session ID when query changes to force new results
+    if (query && sessionId) {
+      const lastQuery = localStorage.getItem('lastSearchQuery');
+      if (lastQuery && lastQuery !== query) {
+        setSessionId(null);
+        console.log('Query changed, resetting session ID');
+      }
+    }
+    
+    // Store current query for future comparison
+    localStorage.setItem('lastSearchQuery', query);
+    
     setCurrentPage(page);
-    fetchResults();
-  }, [query, page]);
+    // Use the session ID from URL if available, otherwise use the stored one
+    const effectiveSessionId = searchSessionId || sessionId;
+    fetchResults(effectiveSessionId);
+  }, [query, page, searchSessionId]);
   
-  const fetchResults = async () => {
+  const fetchResults = async (currentSessionId) => {
     setLoading(true);
     setError(null);
     
@@ -262,18 +368,50 @@ const SearchResults = () => {
       });
       setOperator(processedQueryData.operator || null);
       
-      // Fetch search results
+      // Fetch search results with session ID for consistent pagination
       console.log('Fetching search results for:', query);
-      const searchResponse = await axios.get(
-        `${API_BASE_URL}/search?query=${encodeURIComponent(query)}&page=${page}&size=${resultsPerPage}`
-      );
+      const searchUrl = `${API_BASE_URL}/search?query=${encodeURIComponent(query)}&page=${page}&size=${resultsPerPage}`;
+      const urlWithSession = currentSessionId ? `${searchUrl}&sessionId=${currentSessionId}` : searchUrl;
+      
+      const searchResponse = await axios.get(urlWithSession);
       
       const endTime = performance.now();
       setLoadTime((endTime - startTime).toFixed(2));
       
       console.log('Search results:', searchResponse.data);
+      
+      // Set standard results
       setResults(searchResponse.data.results || []);
       setTotalResults(searchResponse.data.totalResults || 0);
+      
+      // Store the session ID for future pagination
+      const newSessionId = searchResponse.data.sessionId;
+      if (newSessionId) {
+        setSessionId(newSessionId);
+        // Update URL if needed without triggering a reload
+        if (!searchSessionId && window.history.replaceState) {
+          const newParams = new URLSearchParams(location.search);
+          newParams.set('sid', newSessionId);
+          const newUrl = `${location.pathname}?${newParams.toString()}`;
+          window.history.replaceState({ path: newUrl }, '', newUrl);
+        }
+      }
+      
+      // Set enhanced pagination information
+      setPaginationInfo({
+        totalPages: searchResponse.data.totalPages || 0,
+        hasNextPage: searchResponse.data.hasNextPage || false,
+        hasPreviousPage: searchResponse.data.hasPreviousPage || false,
+        startItem: searchResponse.data.startItem || 0,
+        endItem: searchResponse.data.endItem || 0
+      });
+      
+      // Set suggested queries
+      setSuggestedQueries(searchResponse.data.suggestedQueries || []);
+      
+      // Set ranking factors
+      setRankingFactors(searchResponse.data.rankingFactors || {});
+      
       setLoading(false);
     } catch (err) {
       console.error('Error fetching search results:', err);
@@ -297,12 +435,27 @@ const SearchResults = () => {
   };
   
   const handlePageChange = (newPage) => {
-    if (newPage < 1 || newPage > Math.ceil(totalResults / resultsPerPage)) return;
-    navigate(`/search?q=${encodeURIComponent(query)}&page=${newPage}`);
+    if (newPage < 1 || newPage > paginationInfo.totalPages) return;
+    
+    // Always include session ID in pagination URLs for consistency
+    const url = `/search?q=${encodeURIComponent(query)}&page=${newPage}${sessionId ? `&sid=${sessionId}` : ''}`;
+    navigate(url);
+  };
+  
+  const handleSuggestedQueryClick = (suggestedQuery) => {
+    // Start a new search session for a new query, explicitly clearing session ID
+    setSessionId(null); // Reset session ID for new query
+    navigate(`/search?q=${encodeURIComponent(suggestedQuery)}&page=1`);
+  };
+  
+  const handleNewSearch = (newQuery) => {
+    // Always clear session ID for new searches to ensure fresh results
+    setSessionId(null);
+    navigate(`/search?q=${encodeURIComponent(newQuery)}&page=1`);
   };
   
   const renderPagination = () => {
-    const totalPages = Math.ceil(totalResults / resultsPerPage);
+    const { totalPages } = paginationInfo;
     
     if (totalPages <= 1) return null;
     
@@ -310,7 +463,7 @@ const SearchResults = () => {
       <PaginationContainer>
         <PageButton 
           onClick={() => handlePageChange(currentPage - 1)}
-          disabled={currentPage === 1}
+          disabled={!paginationInfo.hasPreviousPage}
         >
           Previous
         </PageButton>
@@ -346,7 +499,7 @@ const SearchResults = () => {
         
         <PageButton 
           onClick={() => handlePageChange(currentPage + 1)}
-          disabled={currentPage === totalPages}
+          disabled={!paginationInfo.hasNextPage}
         >
           Next
         </PageButton>
@@ -354,8 +507,47 @@ const SearchResults = () => {
     );
   };
   
-  const keywords = [...processedQuery.phrases, ...processedQuery.stemmed];
+  const renderSuggestedQueries = () => {
+    if (!suggestedQueries || suggestedQueries.length === 0) return null;
+    
+    return (
+      <SuggestionsContainer>
+        <SuggestionTitle>Related searches:</SuggestionTitle>
+        <SuggestionsWrapper>
+          {suggestedQueries.map((suggestion, index) => (
+            <SuggestionButton 
+              key={index}
+              onClick={() => handleSuggestedQueryClick(suggestion)}
+            >
+              {suggestion}
+            </SuggestionButton>
+          ))}
+        </SuggestionsWrapper>
+      </SuggestionsContainer>
+    );
+  };
   
+  const renderResultRankingInfo = () => {
+    if (!rankingFactors || Object.keys(rankingFactors).length === 0) return null;
+    
+    return (
+      <RankingInfoTooltip title={
+        <div>
+          <h4>Ranking factors:</h4>
+          <ul>
+            {Object.entries(rankingFactors).map(([key, description]) => (
+              <li key={key}><strong>{key}</strong>: {description}</li>
+            ))}
+          </ul>
+        </div>
+      }>
+        <RankingInfoIcon>ⓘ</RankingInfoIcon>
+      </RankingInfoTooltip>
+    );
+  };
+  
+  const keywords = [...processedQuery.phrases, ...processedQuery.stemmed];
+
   // Format the operator for display
   const getOperatorDisplay = () => {
     if (!operator) return null;
@@ -370,16 +562,16 @@ const SearchResults = () => {
       <ContentWrapper>
         <SearchHeader>
           <Logo to="/">Search Engine</Logo>
-          <SearchBar />
+          <SearchBar initialQuery={query} onSearch={handleNewSearch} />
         </SearchHeader>
         
         {!loading && !error && (
           <SearchInfo>
-            ⏱️ Results found in {loadTime} ms - {totalResults} results 
+            ⏱️ Results found in {loadTime} ms - Showing {paginationInfo.startItem}-{paginationInfo.endItem} of {totalResults} results 
             {operator && (
               <> using {getOperatorDisplay()} operation</>
             )} 
-            for "{query}"
+            for "{query}" {renderResultRankingInfo()}
           </SearchInfo>
         )}
         
@@ -400,9 +592,11 @@ const SearchResults = () => {
           </NoResults>
         ) : (
           <>
-        <ResultsList>
+            {renderSuggestedQueries()}
+            
+            <ResultsList>
               {results.map((result, index) => (
-            <ResultItem key={index}>
+                <ResultItem key={index}>
                   <ResultLink href={result.url} target="_blank" rel="noopener noreferrer">
                     {result.title || 'No Title'}
                   </ResultLink>
@@ -412,15 +606,14 @@ const SearchResults = () => {
                   <ResultSnippet>
                     {highlightText(result.snippet || 'No description available', keywords)}
                   </ResultSnippet>
-            </ResultItem>
-          ))}
-        </ResultsList>
+                </ResultItem>
+              ))}
+            </ResultsList>
             
             {renderPagination()}
           </>
         )}
       </ContentWrapper>
-      <Footer />
     </ResultsContainer>
   );
 };

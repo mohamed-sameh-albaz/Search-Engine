@@ -49,33 +49,88 @@ public class IndexController {
     @PostMapping("/reindex")
     public Map<String, Object> reindex(@RequestParam(required = false) List<String> urls) {
         Map<String, Object> response = new HashMap<>();
-        Map<String, String> documentsToIndex = new HashMap<>();
         
-        if (urls != null && !urls.isEmpty()) {
-            // Reindex specific URLs
-            for (String url : urls) {
-                Document doc = documentRepository.findByUrl(url).orElse(null);
-                if (doc != null && doc.getContent() != null) {
-                    documentsToIndex.put(doc.getUrl(), doc.getContent());
+        try {
+            if (urls != null && !urls.isEmpty()) {
+                // Reindex specific URLs - this is fine since it's a small list
+                Map<String, String> documentsToIndex = new HashMap<>();
+                for (String url : urls) {
+                    Document doc = documentRepository.findByUrl(url).orElse(null);
+                    if (doc != null && doc.getContent() != null) {
+                        documentsToIndex.put(doc.getUrl(), doc.getContent());
+                    }
                 }
-            }
-            response.put("message", "Reindexing " + documentsToIndex.size() + " specific documents");
-        } else {
-            // Reindex all documents
-            Page<Document> documentPage = documentRepository.findAll(PageRequest.of(0, 100));
-            for (Document doc : documentPage.getContent()) {
-                if (doc.getUrl() != null && doc.getContent() != null) {
-                    documentsToIndex.put(doc.getUrl(), doc.getContent());
+                
+                if (!documentsToIndex.isEmpty()) {
+                    indexService.buildIndex(documentsToIndex);
+                    response.put("message", "Reindexed " + documentsToIndex.size() + " specific documents");
+                    response.put("status", "success");
+                } else {
+                    response.put("message", "No documents found with the specified URLs");
+                    response.put("status", "warning");
                 }
+            } else {
+                // For indexing all documents, we'll process in small batches to avoid memory issues
+                long totalDocuments = documentRepository.count();
+                int batchSize = 50; // Process 50 documents at a time
+                long totalBatches = (totalDocuments + batchSize - 1) / batchSize; // Ceiling division
+                
+                response.put("message", "Started reindexing all " + totalDocuments + 
+                             " documents in " + totalBatches + " batches. Each batch will process " + 
+                             batchSize + " documents.");
+                response.put("status", "success");
+                
+                // Start the reindexing process in a separate thread
+                new Thread(() -> {
+                    try {
+                        System.out.println("Starting background reindexing of all documents...");
+                        int page = 0;
+                        boolean hasMore = true;
+                        int processedCount = 0;
+                        
+                        while (hasMore) {
+                            // Process one batch at a time
+                            Map<String, String> batch = new HashMap<>();
+                            Page<Document> documentPage = documentRepository.findAll(PageRequest.of(page, batchSize));
+                            
+                            if (documentPage.isEmpty()) {
+                                hasMore = false;
+                                continue;
+                            }
+                            
+                            for (Document doc : documentPage.getContent()) {
+                                if (doc.getUrl() != null && doc.getContent() != null) {
+                                    batch.put(doc.getUrl(), doc.getContent());
+                                }
+                            }
+                            
+                            // Index this batch
+                            if (!batch.isEmpty()) {
+                                indexService.buildIndex(batch);
+                                processedCount += batch.size();
+                                System.out.println("Indexed batch " + (page+1) + " of " + totalBatches + 
+                                                  " (" + processedCount + "/" + totalDocuments + " documents)");
+                            }
+                            
+                            page++;
+                            
+                            // Give the JVM some time to clean up between batches
+                            batch.clear();
+                            System.gc();
+                            Thread.sleep(500); // Short pause between batches
+                        }
+                        
+                        System.out.println("Background reindexing completed: " + processedCount + " documents processed");
+                    } catch (Exception e) {
+                        System.err.println("Error during background reindexing: " + e.getMessage());
+                        e.printStackTrace();
+                    }
+                }).start();
             }
-            response.put("message", "Reindexing " + documentsToIndex.size() + " documents (first batch)");
-        }
-        
-        if (!documentsToIndex.isEmpty()) {
-            indexService.buildIndex(documentsToIndex);
-            response.put("status", "success");
-        } else {
-            response.put("status", "no documents found");
+        } catch (Exception e) {
+            response.put("status", "error");
+            response.put("message", "Error during reindexing: " + e.getMessage());
+            e.printStackTrace();
         }
         
         return response;

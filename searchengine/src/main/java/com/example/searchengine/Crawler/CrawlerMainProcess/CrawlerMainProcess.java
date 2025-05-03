@@ -55,6 +55,8 @@ public class CrawlerMainProcess {
     private Set<String> excludedLinks = Collections.synchronizedSet(new HashSet<>());
     Thread[] threads;
     private static long startTime = 0;
+    private Map<Long, Map<Long, Integer>> cachedRelationMap = null;
+    private int[][] cachedRelationMatrix = null;
 
     @GetMapping("/status")
     public Map<String, Object> getStatus() {
@@ -179,21 +181,21 @@ public class CrawlerMainProcess {
         for (int i = 0; i < thread_num; i++) {
             final int threadId = i;
             threads[i] = new Thread(() -> {
-                try {
+            try {
                     crawl();
                 } catch (Exception e) {
                     System.err.println("Error in crawler thread " + threadId + ": " + e.getMessage());
-                    e.printStackTrace();
+                e.printStackTrace();
                 } finally {
                     if (getActiveThreadCount() == 0) {
                         isRunning = false;
                     }
-                }
+            }
             });
             threads[i].setDaemon(true);
             threads[i].start();
         }
-        
+
         response.put("status", "Crawler started with " + thread_num + " threads");
         response.put("message", "Crawling in progress using " + seedLinks.length + " seed URLs.");
         
@@ -210,7 +212,7 @@ public class CrawlerMainProcess {
             while ((line = Reader.readLine()) != null) {
                 if (!line.trim().isEmpty()) {
                     seedLinksList.add(line.trim());
-                }
+            }
             }
             
             Reader.close();
@@ -313,7 +315,7 @@ public class CrawlerMainProcess {
             // Add existing documents to our tracking maps
             for (com.example.searchengine.Crawler.Entities.Document doc : crawlers) {
                 if (doc.getUrl() != null) {
-                    visitedUrls.put(doc.getUrl(), doc);
+                visitedUrls.put(doc.getUrl(), doc);
                 }
             }
         } catch (Exception e) {
@@ -418,13 +420,13 @@ public class CrawlerMainProcess {
                     }
                     
                     // Save the relationship between parent and child
-                    try {
-                        serveDataBase.saveRelatedLinks(parentUrl.toString(), finalUrl);
-                    } catch (Exception e) {
+                        try {
+                            serveDataBase.saveRelatedLinks(parentUrl.toString(), finalUrl);
+                        } catch (Exception e) {
                         // Just log and continue
-                        System.out.println("Error saving related links: " + e.getMessage());
-                    }
-                    
+                            System.out.println("Error saving related links: " + e.getMessage());
+                        }
+
                     // Add to queue if not visited
                     if (!visitedUrls.containsKey(finalUrl) && isAllowedByRobots(finalUrl)) {
                         com.example.searchengine.Crawler.Entities.Document childDoc = new com.example.searchengine.Crawler.Entities.Document();
@@ -448,12 +450,12 @@ public class CrawlerMainProcess {
         } catch (Exception e) {
             System.err.println("Error processing links from " + parentUrl + ": " + e.getMessage());
         }
-    }
+                }
 
     private void processQueue(BlockingQueue<com.example.searchengine.Crawler.Entities.Document> queue,
                              ConcurrentHashMap<String, com.example.searchengine.Crawler.Entities.Document> visitedUrls) {
         while (!queue.isEmpty() && !Thread.currentThread().isInterrupted() && !stopFlag) {
-            if (count.get() >= MAX_DOCUMENTS) {
+                if (count.get() >= MAX_DOCUMENTS) {
                 close();
                 return;
             }
@@ -502,7 +504,7 @@ public class CrawlerMainProcess {
     }
 
     public void close() {
-        stopFlag = true;
+            stopFlag = true;
         isRunning = false;
         System.out.println("Crawler is stopping...");
         for (Thread thread : threads) {
@@ -558,13 +560,13 @@ public class CrawlerMainProcess {
 
             for (int i = 0; i < path.length(); i++) {
                 if (path.charAt(i) == '%' && i + 2 < path.length()) {
-                    try {
+                try {
                         int num = Integer.parseInt(path.substring(i + 1, i + 3), 16);
                         path = path.substring(0, i) + (char) num + path.substring(i + 3);
                     } catch (NumberFormatException e) {
                         // Ignore invalid encoding
-                    }
                 }
+            }
             }
 
             String normalizedUrl = protocol + "://" + host + path;
@@ -579,41 +581,293 @@ public class CrawlerMainProcess {
     }
 
     public Map<Long, Map<Long, Integer>> relationBetweenDocs() {
-        Map<Long, Map<Long, Integer>> relationMap = new Hashtable<>();
-        Map<Long, Integer> childDocIdMap = new Hashtable<>();
-        List<Object[]> relatedLinksIDs = relatedLinksRepository.getRelatedLinksIDs();
-        for (Object[] row : relatedLinksIDs) {
-            Long childDocId = (Long) row[1];
-            Long parentDocId = (Long) row[0];
-            relationMap.computeIfAbsent(parentDocId, k -> new Hashtable<>()).put(childDocId, 1);
+        // Return cached result if available
+        if (cachedRelationMap != null) {
+            System.out.println("Using cached relationship map");
+            return cachedRelationMap;
         }
-        for (Map.Entry<Long, Map<Long, Integer>> entry : relationMap.entrySet()) {
-            Long parentDocId = entry.getKey();
-            Map<Long, Integer> children = entry.getValue();
-            System.out.println("Parent Doc ID: " + parentDocId);
-            for (Map.Entry<Long, Integer> childEntry : children.entrySet()) {
-                System.out.println("  Child Doc ID: " + childEntry.getKey() + ", Value: " + childEntry.getValue());
+        
+        // Use more efficient HashMap instead of Hashtable which has synchronized methods
+        Map<Long, Map<Long, Integer>> relationMap = new HashMap<>();
+        
+        // Display start message
+        displayProgress("Loading document relationships...");
+        
+        // Get relationships using repository method
+        List<Object[]> relatedLinksIDs = relatedLinksRepository.getRelatedLinksIDs();
+        
+        // Count total items for progress tracking
+        int total = relatedLinksIDs.size();
+        System.out.println("Total relationships to process: " + total);
+        
+        // Performance optimization: pre-size the maps based on number of documents
+        int expectedDocsPerParent = 20; // Estimated average number of children per parent
+        int current = 0;
+        int displayFrequency = getUpdateFrequency(total, 1); // Update every 1%
+        
+        // Process in batches for better performance
+        int batchSize = 5000;
+        for (int i = 0; i < total; i += batchSize) {
+            int endIndex = Math.min(i + batchSize, total);
+            List<Object[]> batch = relatedLinksIDs.subList(i, endIndex);
+            
+            for (Object[] row : batch) {
+                Long childDocId = (Long) row[1];
+                Long parentDocId = (Long) row[0];
+                
+                // Create child map with initial capacity if it doesn't exist
+                relationMap.computeIfAbsent(parentDocId, k -> new HashMap<>(expectedDocsPerParent)).put(childDocId, 1);
+                
+                // Update progress bar
+                current++;
+                if (current % displayFrequency == 0 || current == total) {
+                    displayProgress("Processing relationships complete!");
+                }
             }
         }
+        
+        // Use the utility for displaying document relationships
+        displayRelationships(relationMap, 10, 10);
+        
+        // Cache the result
+        cachedRelationMap = relationMap;
+        
         return relationMap;
     }
 
+    /**
+     * Creates a sparse matrix representation of document relationships
+     * This is much more memory efficient than a full matrix for large document sets
+     */
     public int[][] relationMatrix() {
+        // Return cached result if available
+        if (cachedRelationMatrix != null) {
+            System.out.println("Using cached relationship matrix");
+            return cachedRelationMatrix;
+        }
+
+        displayProgress("Building relationship matrix...");
+        
         Map<Long, Map<Long, Integer>> relationMap = relationBetweenDocs();
-        int size = 6000;
-        int[][] matrix = new int[size][size];
+        
+        // Find the maximum document ID to determine matrix size
+        long maxDocId = 0;
+        for (Map.Entry<Long, Map<Long, Integer>> entry : relationMap.entrySet()) {
+            maxDocId = Math.max(maxDocId, entry.getKey());
+            for (Long childId : entry.getValue().keySet()) {
+                maxDocId = Math.max(maxDocId, childId);
+            }
+        }
+        
+        // Create matrix with proper size (+1 because IDs start at 0)
+        int size = (int) Math.min(maxDocId + 1, 6000); // Cap at 6000 to prevent excessive memory usage
+        System.out.println("Creating relationship matrix of size " + size + "x" + size);
+        
+        // Use a more efficient matrix creation approach
+        int[][] matrix = new int[size][];
+        int parentCount = 0;
+        int totalParents = relationMap.size();
+        
         for (Map.Entry<Long, Map<Long, Integer>> parentEntry : relationMap.entrySet()) {
             Long parentId = parentEntry.getKey();
             if (parentId == null || parentId < 0 || parentId >= size)
                 continue;
+            
+            // Create row only when needed (sparse matrix)
+            int parentIndex = parentId.intValue();
+            if (matrix[parentIndex] == null) {
+                matrix[parentIndex] = new int[size];
+            }
+            
             Map<Long, Integer> children = parentEntry.getValue();
             for (Map.Entry<Long, Integer> childEntry : children.entrySet()) {
                 Long childId = childEntry.getKey();
                 if (childId == null || childId < 0 || childId >= size)
                     continue;
-                matrix[parentId.intValue()][childId.intValue()] = 1;
+                matrix[parentIndex][childId.intValue()] = 1;
+            }
+            
+            // Show progress
+            parentCount++;
+            if (parentCount % 100 == 0 || parentCount == totalParents) {
+                displayProgress("Relationship matrix completed");
             }
         }
+        
+        // Cache the result
+        cachedRelationMatrix = matrix;
+        
         return matrix;
+    }
+
+    /**
+     * Clear cached relationship data
+     * Call this method after making changes to the document relationships
+     */
+    public void clearRelationshipCache() {
+        cachedRelationMap = null;
+        cachedRelationMatrix = null;
+        System.out.println("Relationship cache cleared");
+    }
+
+    /**
+     * Reset database and start a fresh crawl
+     * @param thread_num Number of crawler threads to use
+     * @return Response indicating operation status
+     */
+    @PostMapping("/reset-and-crawl")
+    public Map<String, Object> resetDatabaseAndCrawl(@RequestParam(required = true, defaultValue = "4") int thread_num) {
+        Map<String, Object> response = new HashMap<>();
+        
+        if (isRunning) {
+            response.put("status", "error");
+            response.put("message", "Cannot reset database while crawler is running. Stop the crawler first.");
+            return response;
+        }
+        
+        try {
+            // Count how many documents we'll delete
+            long documentCount = documentsRepository.count();
+            long relationshipCount = relatedLinksRepository.count();
+            
+            // Reset the database - delete all documents and relationships
+            System.out.println("Deleting all documents and relationships from database...");
+            relatedLinksRepository.deleteAll();
+            documentsRepository.deleteAll();
+            
+            // Clear caches
+            cachedRelationMap = null;
+            cachedRelationMatrix = null;
+            
+            response.put("status", "success");
+            response.put("deletedDocuments", documentCount);
+            response.put("deletedRelationships", relationshipCount);
+            response.put("message", "Database reset successfully. Starting fresh crawl.");
+            
+            // Reset counters for fresh crawl
+            count.set(0);
+            stopFlag = false;
+            isRunning = true;
+            startTime = System.currentTimeMillis();
+            
+            // Start crawling with specified number of threads
+            threads = new Thread[thread_num];
+            for (int i = 0; i < thread_num; i++) {
+                final int threadId = i;
+                threads[i] = new Thread(() -> {
+                    try {
+                        crawl();
+                    } catch (Exception e) {
+                        System.err.println("Error in crawler thread " + threadId + ": " + e.getMessage());
+                        e.printStackTrace();
+                    } finally {
+                        if (getActiveThreadCount() == 0) {
+                            isRunning = false;
+                        }
+                    }
+                });
+                threads[i].setDaemon(true);
+                threads[i].start();
+            }
+            
+            response.put("crawlStatus", "Started with " + thread_num + " threads");
+            
+        } catch (Exception e) {
+            response.put("status", "error");
+            response.put("message", "Error resetting database: " + e.getMessage());
+        }
+        
+        return response;
+    }
+    
+    /**
+     * Stop the crawler if it's running
+     */
+    @PostMapping("/stop")
+    public Map<String, Object> stopCrawler() {
+        Map<String, Object> response = new HashMap<>();
+        
+        if (!isRunning) {
+            response.put("status", "info");
+            response.put("message", "Crawler is not running.");
+            return response;
+        }
+        
+        try {
+            close();
+            response.put("status", "success");
+            response.put("message", "Crawler stopped successfully.");
+        } catch (Exception e) {
+            response.put("status", "error");
+            response.put("message", "Error stopping crawler: " + e.getMessage());
+        }
+        
+        return response;
+    }
+
+    // Add a simple progress method
+    private void displayProgress(String message) {
+        System.out.println(message);
+    }
+
+    // Replace all ProgressBarUtil.startProgress calls with displayProgress
+    // Replace all ProgressBarUtil.completeProgress calls with displayProgress
+    // Replace all ProgressBarUtil.displayProgressBar calls with simple console output
+    // Replace all DocumentRelationshipUtil.displayRelationships calls with simple console output
+    // For example:
+    // ProgressBarUtil.startProgress("Loading document relationships...") becomes displayProgress("Loading document relationships...")
+
+    /**
+     * Calculate how frequently to update the progress bar
+     * 
+     * @param total Total number of items
+     * @param percentInterval How often to update (in percent intervals)
+     * @return Number of items between updates
+     */
+    private int getUpdateFrequency(int total, int percentInterval) {
+        if (total <= 0 || percentInterval <= 0 || percentInterval > 100) {
+            return 1;
+        }
+        
+        // Calculate items per percentage point
+        int itemsPerPercent = Math.max(1, total / 100);
+        
+        // Return items per update interval
+        return Math.max(1, itemsPerPercent * percentInterval);
+    }
+    
+    /**
+     * Display statistics about document relationships
+     * 
+     * @param relationMap Map of document relationships
+     * @param topParents Number of top parents to display
+     * @param topChildren Number of top children per parent to display
+     */
+    private void displayRelationships(Map<Long, Map<Long, Integer>> relationMap, int topParents, int topChildren) {
+        if (relationMap == null || relationMap.isEmpty()) {
+            System.out.println("No document relationships to display.");
+            return;
+        }
+        
+        System.out.println("\nDocument Relationship Statistics:");
+        System.out.println("================================");
+        
+        // Count documents
+        int totalParents = relationMap.size();
+        int totalRelationships = 0;
+        for (Map<Long, Integer> childMap : relationMap.values()) {
+            totalRelationships += childMap.size();
+        }
+        
+        System.out.println("Total parent documents: " + totalParents);
+        System.out.println("Total relationships: " + totalRelationships);
+        
+        if (totalParents == 0) return;
+        
+        // Calculate avg children per parent
+        double avgChildrenPerParent = (double) totalRelationships / totalParents;
+        System.out.printf("Average children per parent: %.2f\n", avgChildrenPerParent);
+        
+        System.out.println("\nAnalysis complete.");
     }
 }

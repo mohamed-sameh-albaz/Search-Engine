@@ -89,10 +89,10 @@ const App = () => {
   return (
     <Router>
       <AppContainer>
-        <Routes>
+      <Routes>
           <Route path="/" element={<HomePage />} />
-          <Route path="/search" element={<SearchResults />} />
-        </Routes>
+        <Route path="/search" element={<SearchResults />} />
+      </Routes>
       </AppContainer>
     </Router>
   );

@@ -14,38 +14,40 @@ public class QueryResult {
     private List<Map<String, Object>> results;
     private String errorMessage;
     private String operator;
+    private List<String> suggestedQueries;
 
     public QueryResult() {
         this.stemmedWords = new ArrayList<>();
         this.phrases = new ArrayList<>();
         this.matchingDocuments = new HashMap<>();
         this.results = new ArrayList<>();
+        this.suggestedQueries = new ArrayList<>();
     }
 
     public String getOriginalQuery() {
         return originalQuery;
     }
-
+    
     public void setOriginalQuery(String originalQuery) {
         this.originalQuery = originalQuery;
     }
-
+    
     public boolean isPhraseQuery() {
         return isPhraseQuery;
     }
-
+    
     public void setPhraseQuery(boolean phraseQuery) {
         isPhraseQuery = phraseQuery;
     }
-
+    
     public List<String> getStemmedWords() {
         return stemmedWords;
     }
-
+    
     public void setStemmedWords(List<String> stemmedWords) {
         this.stemmedWords = stemmedWords;
     }
-
+    
     public List<String> getPhrases() {
         return phrases;
     }
@@ -125,5 +127,13 @@ public class QueryResult {
         }
         
         return builder.toString();
+    }
+
+    public List<String> getSuggestedQueries() {
+        return suggestedQueries;
+    }
+    
+    public void setSuggestedQueries(List<String> suggestedQueries) {
+        this.suggestedQueries = suggestedQueries;
     }
 } 

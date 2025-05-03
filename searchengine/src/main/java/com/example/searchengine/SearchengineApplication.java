@@ -59,36 +59,71 @@ public class SearchengineApplication implements CommandLineRunner {
     @Override
     @Transactional
     public void run(String... args) throws Exception {
-        Map<String, String> documentsToIndex = fetchDocumentsForIndexing();
-        // maintenanceService.vacuumDatabase();
-        if (!documentsToIndex.isEmpty()) {
-            System.out.println("Re-indexing " + documentsToIndex.size() + "documents...");
-             indexerService.buildIndex(documentsToIndex);
-        } else {
-            System.out.println("No documents found to re-index.");
-        }
+        System.out.println("Starting search engine initialization...");
+        
+        // Process documents in small batches
+        System.out.println("Processing documents in small batches to avoid out of memory errors...");
+        // Commenting out automatic indexing at startup to prevent memory issues
+        // processDocumentsInBatches();
+        System.out.println("Skipping document indexing at startup. Use /reindex endpoint to manually start indexing.");
+        
+        System.out.println("Search engine initialization complete!");
+        System.out.println("Search engine ready for use.");
     }
 
-    private Map<String, String> fetchDocumentsForIndexing() {
-        Map<String, String> documentsToIndex = new HashMap<>();
-        int pageSize = 20;
+    /**
+     * Process documents in small batches to avoid memory issues
+     */
+    private void processDocumentsInBatches() {
+        int pageSize = 20; // Small batch size to avoid memory issues
         int page = 0;
         boolean hasMore = true;
-
-        // while (hasMore) {
-        Page<Document> documentPage = documentRepository.findAll(PageRequest.of(page,
-                pageSize));
-        for (Document doc : documentPage.getContent()) {
-            if (doc.getUrl() != null && doc.getContent() != null) {
-                documentsToIndex.put(doc.getUrl(), doc.getContent());
+        int totalProcessed = 0;
+        
+        System.out.println("Starting document processing...");
+        long startTime = System.currentTimeMillis();
+        
+        while (hasMore) {
+            Page<Document> documentPage = documentRepository.findAll(PageRequest.of(page, pageSize));
+            
+            if (documentPage.isEmpty()) {
+                hasMore = false;
+                continue;
+            }
+            
+            // Build a batch map of documents to index
+            Map<String, String> batchToIndex = new HashMap<>();
+            for (Document doc : documentPage.getContent()) {
+                if (doc.getUrl() != null && doc.getContent() != null) {
+                    batchToIndex.put(doc.getUrl(), doc.getContent());
+                }
+            }
+            
+            if (!batchToIndex.isEmpty()) {
+                // Index this batch immediately
+                System.out.println("Indexing batch " + (page + 1) + " with " + batchToIndex.size() + " documents...");
+                indexerService.buildIndex(batchToIndex);
+                
+                totalProcessed += batchToIndex.size();
+                long elapsedSecs = (System.currentTimeMillis() - startTime) / 1000;
+                System.out.println("Progress: " + totalProcessed + " documents processed in " + elapsedSecs + " seconds");
+            }
+            
+            // Clear memory and move to next page
+            batchToIndex.clear();
+            page++;
+            
+            // Small pause to allow GC to run if needed
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
         }
-        hasMore = documentPage.hasNext();
-        page++;
-        System.out.println(documentsToIndex.size());
-        // }
-
-        return documentsToIndex;
+        
+        long totalTime = (System.currentTimeMillis() - startTime) / 1000;
+        System.out.println("Document processing complete! Processed " + totalProcessed + 
+                           " documents in " + totalTime + " seconds");
     }
 
     @Bean

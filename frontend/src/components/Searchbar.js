@@ -119,8 +119,8 @@ const VoiceRecognition = styled.div`
   }
 `;
 
-const SearchBar = ({ isResults }) => {
-  const [query, setQuery] = useState('');
+const SearchBar = ({ isResults, initialQuery, onSearch }) => {
+  const [query, setQuery] = useState(initialQuery || '');
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState('');
   const navigate = useNavigate();
@@ -129,19 +129,21 @@ const SearchBar = ({ isResults }) => {
   
   // Get query from URL if on results page
   useEffect(() => {
-    if (!isHomePage) {
-      const params = new URLSearchParams(location.search);
-      const urlQuery = params.get('q');
-      if (urlQuery) {
-        setQuery(urlQuery);
-      }
+    if (!isHomePage && initialQuery) {
+      setQuery(initialQuery);
     }
-  }, [location, isHomePage]);
+  }, [initialQuery, isHomePage]);
   
   const handleSearch = (e) => {
     if (e) e.preventDefault();
     if (query.trim()) {
-      navigate(`/search?q=${encodeURIComponent(query)}`);
+      if (onSearch) {
+        // Use the provided onSearch handler if available (for fresh results)
+        onSearch(query);
+      } else {
+        // Default navigation behavior
+        navigate(`/search?q=${encodeURIComponent(query)}`);
+      }
     }
   };
   

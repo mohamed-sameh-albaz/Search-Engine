@@ -32,6 +32,10 @@ import com.example.searchengine.Indexer.Service.PreIndexer;
 // Add OpenNLP Porter Stemmer
 import opennlp.tools.stemmer.PorterStemmer;
 import org.jsoup.Jsoup;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import com.example.searchengine.config.SearchConfig;
 
 @Service
 public class QueryService {
@@ -131,11 +135,23 @@ public class QueryService {
             result.setMatchingDocuments(matchingDocuments);
             
             // Fetch the actual document results with snippets
+            List<Map<String, Object>> searchResults;
             if (!isPhraseQuery || phrases.isEmpty()) {
-                result.setResults(fetchRegularSearchResults(stemmedWords, matchingDocuments));
+                searchResults = fetchRegularSearchResults(stemmedWords, matchingDocuments);
             } else {
-                result.setResults(fetchPhraseSearchResults(phrases.get(0), matchingDocuments));
+                searchResults = fetchPhraseSearchResults(phrases.get(0), matchingDocuments);
             }
+            
+            // Apply additional post-processing filters
+            if (!searchResults.isEmpty()) {
+                // Filter out low-quality results and e-commerce pages
+                searchResults = filterLowQualityResults(searchResults, stemmedWords, phrases);
+                
+                // Generate relevant suggested queries
+                result.setSuggestedQueries(generateSuggestedQueries(query, searchResults));
+            }
+            
+            result.setResults(searchResults);
             
             logger.info("Query processing completed with {} results", result.getResults().size());
             
@@ -344,28 +360,69 @@ public class QueryService {
     private void processRegularWords(String text, List<String> stemmedWords, Map<String, List<Long>> matchingDocuments) {
         // Process regular words
         String[] words = text.toLowerCase().split("\\s+");
-            
-            for (String word : words) {
-                word = word.trim();
-                if (!word.isEmpty() && !stopWords.contains(word) && !word.equals("and")) {
+        
+        // Process words in batches to avoid memory issues
+        List<String> processableWords = new ArrayList<>();
+        
+        // List of words that should never be filtered out even if they're short or stop words
+        Set<String> importantTerms = new HashSet<>(Arrays.asList(
+            "vs", "war", "israel", "gaza", "iran", "us", "uk", "un", "eu"
+        ));
+        
+        // Log the original words before processing
+        logger.debug("Processing query words: {}", Arrays.toString(words));
+        
+        for (String word : words) {
+            word = word.trim();
+            if (!word.isEmpty()) {
+                // Keep important terms even if they're in the stop words list
+                if (importantTerms.contains(word) || (!stopWords.contains(word) && !word.equals("and"))) {
                     String stemmed = stemWord(word);
                     if (!stemmed.isEmpty()) {
+                        logger.debug("Adding stemmed word: {} -> {}", word, stemmed);
                         stemmedWords.add(stemmed);
-                    
-                    // Find documents containing this word
-                    Optional<Word> wordEntity = wordRepository.findByWord(stemmed);
-                    if (wordEntity.isPresent()) {
-                        List<InvertedIndex> indices = invertedIndexRepository.findAll().stream()
-                            .filter(entry -> entry.getWord().getId().equals(wordEntity.get().getId()))
-                            .collect(Collectors.toList());
-                        List<Long> docIds = indices.stream()
-                            .map(index -> index.getDocument().getId())
-                            .collect(Collectors.toList());
-                        matchingDocuments.put(stemmed, docIds);
+                        processableWords.add(stemmed);
                     } else {
-                        matchingDocuments.put(stemmed, new ArrayList<>());
+                        // If stemming fails, add the original word
+                        logger.debug("Stemming failed, adding original word: {}", word);
+                        stemmedWords.add(word);
+                        processableWords.add(word);
                     }
                 }
+            }
+        }
+        
+        logger.info("Processed {} words into {} stemmed terms", words.length, stemmedWords.size());
+        
+        // Process words in batches of 10
+        int batchSize = 10;
+        for (int i = 0; i < processableWords.size(); i += batchSize) {
+            int endIndex = Math.min(i + batchSize, processableWords.size());
+            List<String> batch = processableWords.subList(i, endIndex);
+            processWordBatch(batch, matchingDocuments);
+        }
+    }
+    
+    private void processWordBatch(List<String> stemmedBatch, Map<String, List<Long>> matchingDocuments) {
+        for (String stemmed : stemmedBatch) {
+            try {
+                // Find documents containing this word using a more efficient query
+                Optional<Word> wordEntity = wordRepository.findByWord(stemmed);
+                if (wordEntity.isPresent()) {
+                    // Use a more efficient query with pagination
+                    List<Long> docIds = jdbcTemplate.query(
+                        "SELECT doc_id FROM inverted_index WHERE word_id = ? LIMIT 1000",
+                        (rs, rowNum) -> rs.getLong("doc_id"),
+                        wordEntity.get().getId()
+                    );
+                    
+                    matchingDocuments.put(stemmed, docIds);
+                } else {
+                    matchingDocuments.put(stemmed, new ArrayList<>());
+                }
+            } catch (Exception e) {
+                logger.error("Error processing word {}: {}", stemmed, e.getMessage());
+                matchingDocuments.put(stemmed, new ArrayList<>());
             }
         }
     }
@@ -385,112 +442,263 @@ public class QueryService {
             return;
         }
         
-        // Get documents containing all words in the phrase
+        // Log the phrase being searched
+        logger.info("Processing phrase search for: '{}', stemmed as: {}", phrase, filteredAndStemmed);
+        
+        // Get documents containing all words in the phrase using SQL for efficiency
         Set<Long> docsWithAllWords = null;
         
-        for (String stemmed : filteredAndStemmed) {
-            Optional<Word> wordEntity = wordRepository.findByWord(stemmed);
-            if (wordEntity.isPresent()) {
-                List<InvertedIndex> indices = invertedIndexRepository.findAll().stream()
-                    .filter(entry -> entry.getWord().getId().equals(wordEntity.get().getId()))
-                    .collect(Collectors.toList());
-                Set<Long> docIds = indices.stream()
-                    .map(index -> index.getDocument().getId())
-                    .collect(Collectors.toSet());
-                
-                if (docsWithAllWords == null) {
-                    docsWithAllWords = new HashSet<>(docIds);
+        try {
+            for (String stemmed : filteredAndStemmed) {
+                Optional<Word> wordEntity = wordRepository.findByWord(stemmed);
+                if (wordEntity.isPresent()) {
+                    // Use direct SQL query with higher limit (5000 instead of 1000)
+                    List<Long> docIds = jdbcTemplate.query(
+                        "SELECT doc_id FROM inverted_index WHERE word_id = ? LIMIT 5000",
+                        (rs, rowNum) -> rs.getLong("doc_id"),
+                        wordEntity.get().getId()
+                    );
+                    
+                    if (docsWithAllWords == null) {
+                        docsWithAllWords = new HashSet<>(docIds);
+                    } else {
+                        docsWithAllWords.retainAll(docIds);
+                        
+                        // Early termination if no matches found
+                        if (docsWithAllWords.isEmpty()) {
+                            break;
+                        }
+                    }
                 } else {
-                    docsWithAllWords.retainAll(docIds);
+                    // If any word is not found, there are no matching documents
+                    docsWithAllWords = new HashSet<>();
+                    break;
                 }
-            } else {
-                // If any word is not found, there are no matching documents
-                docsWithAllWords = new HashSet<>();
-                break;
             }
+        } catch (Exception e) {
+            logger.error("Error in phrase search for '{}': {}", phrase, e.getMessage());
+            docsWithAllWords = new HashSet<>();
         }
         
         if (docsWithAllWords == null || docsWithAllWords.isEmpty()) {
+            logger.info("No documents found containing all words in phrase: '{}'", phrase);
             matchingDocuments.put(phrase, new ArrayList<>());
             return;
         }
         
-        // For each document, check if the words appear in sequence
-        List<Long> matchingDocs = new ArrayList<>();
+        logger.info("Found {} documents containing all words in phrase: '{}'", docsWithAllWords.size(), phrase);
         
-        for (Long docId : docsWithAllWords) {
-            if (checkPhraseMatch(docId, filteredAndStemmed)) {
-                matchingDocs.add(docId);
+        // Process documents in batches to check if the words appear in sequence
+        List<Long> matchingDocs = new ArrayList<>();
+        List<Long> docIdsList = new ArrayList<>(docsWithAllWords);
+        int batchSize = 20;
+        
+        for (int i = 0; i < docIdsList.size(); i += batchSize) {
+            int endIndex = Math.min(i + batchSize, docIdsList.size());
+            List<Long> batchIds = docIdsList.subList(i, endIndex);
+            
+            for (Long docId : batchIds) {
+                try {
+                    if (checkPhraseMatch(docId, filteredAndStemmed)) {
+                        matchingDocs.add(docId);
+                    }
+                } catch (Exception e) {
+                    logger.error("Error checking phrase match for doc {}: {}", docId, e.getMessage());
+                }
             }
         }
         
+        logger.info("Final count: {} documents matching the exact phrase: '{}'", matchingDocs.size(), phrase);
         matchingDocuments.put(phrase, matchingDocs);
     }
     
     private boolean checkPhraseMatch(Long docId, List<String> stemmedPhrase) {
-        // Get all occurrences of the first word in the document
+        if (stemmedPhrase.isEmpty()) {
+            return false;
+        }
+        
+        // Get the document content to check for exact phrase match first
+        Optional<Document> docOpt = documentRepository.findById(docId);
+        if (docOpt.isPresent()) {
+            Document doc = docOpt.get();
+            if (doc.getContent() != null) {
+                try {
+                    // Parse HTML content
+                    org.jsoup.nodes.Document parsedDoc = org.jsoup.Jsoup.parse(doc.getContent());
+                    String text = parsedDoc.text().toLowerCase();
+                    
+                    // Simple direct content check for the exact phrase
+                    String searchPhrase = String.join(" ", stemmedPhrase).toLowerCase();
+                    if (text.contains(searchPhrase)) {
+                        logger.debug("Document {} contains exact phrase match for '{}'", docId, searchPhrase);
+                        return true;
+                    }
+                    
+                    // Title check is also important
+                    if (doc.getTitle() != null && doc.getTitle().toLowerCase().contains(searchPhrase)) {
+                        logger.debug("Document {} contains exact phrase match in title for '{}'", docId, searchPhrase);
+                        return true;
+                    }
+                } catch (Exception e) {
+                    logger.debug("Error checking content for phrase match in doc {}: {}", docId, e.getMessage());
+                    // Continue with position-based check if content check fails
+                }
+            }
+        }
+        
+        // Get all occurrences of the first word in the document using direct SQL
         Word firstWordEntity = wordRepository.findByWord(stemmedPhrase.get(0)).orElse(null);
         if (firstWordEntity == null) {
             return false;
         }
         
-        List<WordDocumentTag> firstWordTags = wordDocumentTagRepository.findAll().stream()
-            .filter(tag -> tag.getWord().getId().equals(firstWordEntity.getId()) && 
-                          tag.getDocument().getId().equals(docId))
-            .collect(Collectors.toList());
-        
-        for (WordDocumentTag firstTag : firstWordTags) {
-            // For each occurrence of the first word, check if subsequent words follow in sequence
-            int paragraphIdx = firstTag.getParagraphIndex() != null ? firstTag.getParagraphIndex() : 0;
-            int wordIdx = firstTag.getWordIndex() != null ? firstTag.getWordIndex() : 0;
-            boolean allMatch = true;
+        try {
+            // Get first word positions efficiently with a direct query
+            List<Map<String, Object>> firstWordPositions = jdbcTemplate.queryForList(
+                "SELECT paragraph_index, word_index FROM word_document_tags " +
+                "WHERE word_id = ? AND doc_id = ? LIMIT 100", 
+                firstWordEntity.getId(), docId
+            );
             
+            if (firstWordPositions.isEmpty()) {
+                return false;
+            }
+            
+            // Cache word entities to avoid repeated lookups
+            Map<String, Long> wordIdCache = new HashMap<>();
+            wordIdCache.put(stemmedPhrase.get(0), firstWordEntity.getId());
+            
+            // Get the remaining word IDs upfront
             for (int i = 1; i < stemmedPhrase.size(); i++) {
                 Word nextWordEntity = wordRepository.findByWord(stemmedPhrase.get(i)).orElse(null);
                 if (nextWordEntity == null) {
-                    allMatch = false;
-                    break;
+                    return false;
+                }
+                wordIdCache.put(stemmedPhrase.get(i), nextWordEntity.getId());
+            }
+            
+            // Check each position of the first word
+            for (Map<String, Object> firstPos : firstWordPositions) {
+                Integer paragraphIdx = (Integer) firstPos.get("paragraph_index");
+                Integer wordIdx = (Integer) firstPos.get("word_index");
+                
+                if (paragraphIdx == null || wordIdx == null) {
+                    continue;
                 }
                 
-                // Check if this word appears at the next position in the same paragraph
-                List<WordDocumentTag> nextWordTags = wordDocumentTagRepository.findAll().stream()
-                    .filter(tag -> tag.getWord().getId().equals(nextWordEntity.getId()) && 
-                                 tag.getDocument().getId().equals(docId))
-                    .collect(Collectors.toList());
+                boolean allMatch = true;
                 
-                boolean foundNextWord = false;
-                for (WordDocumentTag nextTag : nextWordTags) {
-                    // Check if this tag occurs in the expected position
-                    if (nextTag.getParagraphIndex() != null && nextTag.getWordIndex() != null &&
-                        nextTag.getParagraphIndex().equals(paragraphIdx) && 
-                        nextTag.getWordIndex().equals(wordIdx + i)) {
-                        foundNextWord = true;
+                // Check if all words in the phrase are consecutive
+                for (int i = 1; i < stemmedPhrase.size(); i++) {
+                    Long nextWordId = wordIdCache.get(stemmedPhrase.get(i));
+                    
+                    // Check if the next word exists at the exact position
+                    int count = jdbcTemplate.queryForObject(
+                        "SELECT COUNT(*) FROM word_document_tags " +
+                        "WHERE word_id = ? AND doc_id = ? AND paragraph_index = ? AND word_index = ?", 
+                        Integer.class,
+                        nextWordId, docId, paragraphIdx, wordIdx + i
+                    );
+                    
+                    if (count == 0) {
+                        allMatch = false;
                         break;
                     }
                 }
                 
-                if (!foundNextWord) {
-                    allMatch = false;
-                    break;
+                if (allMatch) {
+                    logger.debug("Document {} contains consecutive phrase match for position-based check", docId);
+                    return true;
                 }
             }
             
-            if (allMatch) {
-                return true;
-            }
+            return false;
+        } catch (Exception e) {
+            logger.error("Error in checkPhraseMatch for doc {}: {}", docId, e.getMessage());
+            return false;
         }
-        
-        return false;
     }
     
     private List<Map<String, Object>> fetchRegularSearchResults(List<String> stemmedWords, Map<String, List<Long>> matchingDocuments) {
-        // For regular search, we combine all matching documents
-        Set<Long> allDocs = new HashSet<>();
-        for (List<Long> docs : matchingDocuments.values()) {
-            allDocs.addAll(docs);
+        // For regular search, we need to ensure ALL query terms are present in the document
+        Set<Long> finalDocs = null;
+        
+        // Start with documents matching the first term
+        for (String term : stemmedWords) {
+            List<Long> docsWithTerm = matchingDocuments.getOrDefault(term, new ArrayList<>());
+            
+            if (finalDocs == null) {
+                // Initialize with first term's documents
+                finalDocs = new HashSet<>(docsWithTerm);
+            } else {
+                // Retain only documents that also contain this term (intersection)
+                finalDocs.retainAll(docsWithTerm);
+            }
+            
+            // If no documents match all terms so far, we can stop early
+            if (finalDocs.isEmpty()) {
+                break;
+            }
         }
         
-        return fetchDocumentDetails(stemmedWords, new ArrayList<>(allDocs));
+        // If no docs match all terms, use a better fallback strategy
+        if (finalDocs == null || finalDocs.isEmpty()) {
+            logger.info("No documents matching ALL query terms, using enhanced relevance strategy");
+            
+            // Step 1: Try to find documents with most of the query terms
+            // Count how many terms each document matches
+            Map<Long, Integer> docMatchCounts = new HashMap<>();
+            
+            for (String term : stemmedWords) {
+                for (Long docId : matchingDocuments.getOrDefault(term, Collections.emptyList())) {
+                    docMatchCounts.put(docId, docMatchCounts.getOrDefault(docId, 0) + 1);
+                }
+            }
+            
+            // If no matches at all, just return empty results
+            if (docMatchCounts.isEmpty()) {
+                return new ArrayList<>();
+            }
+            
+            // Multi-term queries require better term matching
+            if (stemmedWords.size() > 1) {
+                // Calculate minimum required terms (start with at least 50% of terms)
+                int minRequiredTerms = Math.max(1, stemmedWords.size() / 2);
+                
+                // Try to find docs that match at least the minimum required terms
+                Set<Long> highQualityMatches = docMatchCounts.entrySet().stream()
+                    .filter(entry -> entry.getValue() >= minRequiredTerms)
+                    .map(Map.Entry::getKey)
+                    .collect(Collectors.toSet());
+                
+                // If we have high-quality matches, use only those
+                if (!highQualityMatches.isEmpty()) {
+                    finalDocs = highQualityMatches;
+                } else {
+                    // Fall back to top 20% with best match counts
+                    List<Map.Entry<Long, Integer>> sortedDocs = new ArrayList<>(docMatchCounts.entrySet());
+                    sortedDocs.sort((e1, e2) -> e2.getValue().compareTo(e1.getValue()));
+                    
+                    int limit = Math.max(10, sortedDocs.size() / 5); // At least 10 docs or top 20%
+                    finalDocs = sortedDocs.stream()
+                        .limit(limit)
+                        .map(Map.Entry::getKey)
+                        .collect(Collectors.toSet());
+                }
+            } else {
+                // For single term queries, use all matching docs but limit total
+                finalDocs = new HashSet<>(docMatchCounts.keySet());
+                if (finalDocs.size() > 100) {
+                    // If too many results, just take 100 random ones
+                    List<Long> docList = new ArrayList<>(finalDocs);
+                    Collections.shuffle(docList);
+                    finalDocs = new HashSet<>(docList.subList(0, 100));
+                }
+            }
+        }
+        
+        logger.info("Final document count after filtering: {}", finalDocs.size());
+        return fetchDocumentDetails(stemmedWords, new ArrayList<>(finalDocs));
     }
     
     private List<Map<String, Object>> fetchPhraseSearchResults(String phrase, Map<String, List<Long>> matchingDocuments) {
@@ -506,28 +714,87 @@ public class QueryService {
         
         return fetchDocumentDetails(filteredAndStemmed, matchingDocs);
     }
+
+    @Autowired
+    private SearchConfig searchConfig;
+
+    @Autowired
+    private ThreadPoolTaskExecutor searchTaskExecutor;
     
     private List<Map<String, Object>> fetchDocumentDetails(List<String> stemmedWords, List<Long> docIds) {
         List<Map<String, Object>> results = new ArrayList<>();
         
-        for (Long docId : docIds) {
-            Optional<Document> doc = documentRepository.findById(docId);
-            if (doc.isPresent()) {
-                Map<String, Object> result = new HashMap<>();
-                result.put("id", doc.get().getId());
-                result.put("url", doc.get().getUrl());
-                result.put("title", doc.get().getTitle());
+        // Process documents in batches to avoid memory issues
+        int batchSize = searchConfig.getMaxBatchSize();
+        List<Long> limitedDocIds = docIds.size() > 1000 ? docIds.subList(0, 1000) : docIds;
+        
+        try {
+            // Process documents in parallel with batching
+            List<CompletableFuture<List<Map<String, Object>>>> futures = new ArrayList<>();
+            
+            for (int i = 0; i < limitedDocIds.size(); i += batchSize) {
+                final int startIdx = i;
+                final int endIdx = Math.min(i + batchSize, limitedDocIds.size());
                 
-                // Generate a snippet highlighting the query terms
-                String snippet = generateSnippet(doc.get().getContent(), stemmedWords);
-                result.put("snippet", snippet);
+                CompletableFuture<List<Map<String, Object>>> future = CompletableFuture.supplyAsync(() -> {
+                    List<Map<String, Object>> batchResults = new ArrayList<>();
+                    List<Long> batch = limitedDocIds.subList(startIdx, endIdx);
+                    
+                    for (Long docId : batch) {
+                        try {
+                            // Use efficient SQL query instead of loading full document
+                            String sql = "SELECT id, url, title, content FROM documents WHERE id = ?";
+                            Map<String, Object> docData = jdbcTemplate.queryForMap(sql, docId);
+                            
+                            if (docData != null) {
+                                Map<String, Object> result = new HashMap<>();
+                                result.put("id", docData.get("id"));
+                                result.put("url", docData.get("url"));
+                                result.put("title", docData.get("title"));
+                                
+                                // Get the document content for proximity search
+                                String content = (String)docData.get("content");
+                                
+                                // Calculate relevance score using optimized method
+                                double score = calculateRelevanceScoreOptimized(docId, stemmedWords);
+                                
+                                if (content != null) {
+                                    // Check for terms proximity - when terms appear close together in content
+                                    double proximityScore = calculateTermProximity(content, stemmedWords);
+                                    
+                                    // Add proximity score to the final score
+                                    score += proximityScore;
+                                }
+                                
+                                result.put("score", score);
+                                
+                                // Generate a snippet highlighting the query terms
+                                String snippet = generateSnippet((String)docData.get("content"), stemmedWords);
+                                result.put("snippet", snippet);
+                                
+                                batchResults.add(result);
+                            }
+                        } catch (Exception e) {
+                            logger.error("Error processing document {}: {}", docId, e.getMessage());
+                        }
+                    }
+                    
+                    return batchResults;
+                }, searchTaskExecutor);
                 
-                // Calculate relevance score
-                double score = calculateRelevanceScore(docId, stemmedWords);
-                result.put("score", score);
-                
-                results.add(result);
+                futures.add(future);
             }
+            
+            // Combine results from all futures
+            for (CompletableFuture<List<Map<String, Object>>> future : futures) {
+                try {
+                    results.addAll(future.get(30, TimeUnit.SECONDS));
+                } catch (Exception e) {
+                    logger.error("Error waiting for document processing: {}", e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Error in parallel document processing: {}", e.getMessage());
         }
         
         // Sort results by score, descending
@@ -536,57 +803,332 @@ public class QueryService {
         return results;
     }
     
-    private String generateSnippet(String content, List<String> stemmedWords) {
-        // Parse HTML content
-        org.jsoup.nodes.Document parsedDoc = org.jsoup.Jsoup.parse(content);
-        String text = parsedDoc.text();
+    // Optimized version for better performance
+    private double calculateRelevanceScoreOptimized(Long docId, List<String> stemmedWords) {
+        double score = 0.0;
         
-        // Find the best paragraph containing the query words
-        String[] paragraphs = text.split("\\. ");
-        
-        int bestMatchCount = 0;
-        String bestParagraph = "";
-        
-        for (String paragraph : paragraphs) {
-            if (paragraph.length() < 20) continue; // Skip very short paragraphs
+        try {
+            // Skip empty queries
+            if (stemmedWords.isEmpty()) {
+                return 0.0;
+            }
             
-            String lowerParagraph = paragraph.toLowerCase();
-            int matchCount = 0;
+            // Get the document content upfront
+            Optional<Document> docOpt = documentRepository.findById(docId);
+            if (!docOpt.isPresent()) {
+                return 0.0; // Document doesn't exist
+            }
             
-            for (String word : stemmedWords) {
-                // Check if the stemmed word exists in the paragraph
-                List<String> paragraphWords = Arrays.asList(lowerParagraph.split("\\s+"));
-                List<String> stemmedParagraphWords = paragraphWords.stream()
-                    .map(this::stemWord)
-                    .collect(Collectors.toList());
+            Document doc = docOpt.get();
+            String title = doc.getTitle() != null ? doc.getTitle().toLowerCase() : "";
+            String url = doc.getUrl() != null ? doc.getUrl().toLowerCase() : "";
+            
+            // Get document length for TF normalization
+            String content = doc.getContent() != null ? doc.getContent() : "";
+            org.jsoup.nodes.Document parsedDoc = org.jsoup.Jsoup.parse(content);
+            String parsedText = parsedDoc.text().toLowerCase();
+            int documentLength = parsedText.split("\\s+").length;
+            
+            // If document is too short, it might be suspicious
+            if (documentLength < 50) {
+                return 0.01; // Very low score for extremely short documents
+            }
+            
+            // Create query signature for topic detection
+            String querySignature = String.join(" ", stemmedWords).toLowerCase();
+            
+            // Direct relevance boosting - highest priority
+            // This should override all other scoring for exact matches
+            
+            // If document has the exact query in the title, give it an extremely high score
+            if (title.contains(querySignature)) {
+                return 1000.0; // Maximum priority
+            }
+            
+            // If the document has the query terms in the URL, very high priority
+            if (stemmedWords.size() > 1) {
+                boolean allTermsInUrl = true;
+                for (String term : stemmedWords) {
+                    if (!url.contains(term.toLowerCase())) {
+                        allTermsInUrl = false;
+                        break;
+                    }
+                }
                 
-                if (stemmedParagraphWords.contains(word)) {
-                    matchCount++;
+                if (allTermsInUrl) {
+                    return 500.0; // Very high priority
                 }
             }
             
-            if (matchCount > bestMatchCount) {
-                bestMatchCount = matchCount;
-                bestParagraph = paragraph;
-            }
-        }
-        
-        // If no good paragraph was found, take the first substantial one
-        if (bestParagraph.isEmpty() && paragraphs.length > 0) {
-            for (String paragraph : paragraphs) {
-                if (paragraph.length() >= 50) {
-                    bestParagraph = paragraph;
+            // Check if all query terms appear in the title (not necessarily as a phrase)
+            boolean allTermsInTitle = true;
+            for (String term : stemmedWords) {
+                if (!title.contains(term.toLowerCase())) {
+                    allTermsInTitle = false;
                     break;
                 }
             }
+            
+            if (allTermsInTitle) {
+                return 300.0; // High priority
+            }
+            
+            // Calculate TF-IDF for each term in the query
+            double tfIdfSum = 0.0;
+            long totalDocs = documentRepository.count(); // Total documents in corpus
+            
+            // Track how many terms are actually found in the document
+            int termsFoundInDoc = 0;
+            
+            for (String term : stemmedWords) {
+                // Skip empty terms
+                if (term == null || term.isEmpty()) {
+                    continue;
+                }
+                
+                // Find word entity
+                Optional<Word> wordEntity = wordRepository.findByWord(term);
+                if (!wordEntity.isPresent()) {
+                    continue; // Term not in index
+                }
+                
+                // Get term frequency (TF) for this document
+                Integer rawFrequency = null;
+                try {
+                    rawFrequency = jdbcTemplate.queryForObject(
+                        "SELECT frequency FROM inverted_index WHERE word_id = ? AND doc_id = ?",
+                        Integer.class, wordEntity.get().getId(), docId);
+                } catch (Exception e) {
+                    rawFrequency = 0;
+                }
+                
+                if (rawFrequency == null || rawFrequency == 0) {
+                    continue; // Term not in document
+                }
+                
+                // Term was found in document
+                termsFoundInDoc++;
+                
+                // Calculate normalized TF (term frequency / document length)
+                double tf = (double) rawFrequency / Math.max(1, documentLength);
+                
+                // Check for term frequency spam - suspicious if term is >10% of document
+                if (tf > 0.1) {
+                    tf = 0.1; // Cap TF at 10% to prevent spam
+                }
+                
+                // Get document frequency (how many documents contain this term)
+                Long docsWithTerm = null;
+                try {
+                    docsWithTerm = jdbcTemplate.queryForObject(
+                        "SELECT COUNT(*) FROM inverted_index WHERE word_id = ?",
+                        Long.class, wordEntity.get().getId());
+                } catch (Exception e) {
+                    docsWithTerm = 1L; // Default to 1 to avoid division by zero
+                }
+                
+                if (docsWithTerm == null || docsWithTerm == 0) {
+                    docsWithTerm = 1L;
+                }
+                
+                // Calculate IDF (logarithm of total docs / docs with term)
+                double idf = Math.log10((double) totalDocs / docsWithTerm);
+                
+                // Calculate TF-IDF for this term
+                double tfIdf = tf * idf;
+                
+                // Add term's TF-IDF to sum
+                tfIdfSum += tfIdf;
+                
+                // Apply field weightings (title and URL are more important)
+                if (title.contains(term.toLowerCase())) {
+                    // Title matches are very important (3x boost)
+                    tfIdfSum += tfIdf * 3.0;
+                }
+                
+                if (url.contains(term.toLowerCase())) {
+                    // URL matches are important (2x boost)
+                    tfIdfSum += tfIdf * 2.0;
+                }
+            }
+            
+            // Penalize documents missing critical query terms
+            // If half or more terms are missing, severely reduce score
+            if (termsFoundInDoc < stemmedWords.size() / 2) {
+                tfIdfSum *= 0.1; // 90% reduction for documents missing too many terms
+            }
+            
+            // Check for phrase matching (better relevance)
+            if (stemmedWords.size() > 1) {
+                String phrase = String.join(" ", stemmedWords).toLowerCase();
+                if (parsedText.contains(phrase)) {
+                    // Exact phrase match is a strong signal (3x boost)
+                    tfIdfSum *= 3.0;
+                }
+                
+                // Check title for phrase
+                if (title.contains(phrase)) {
+                    // Phrase in title is extremely valuable (3x boost)
+                    tfIdfSum *= 3.0;
+                }
+            }
+            
+            // Final score is the sum of TF-IDF values for all terms
+            score = tfIdfSum;
+            
+        } catch (Exception e) {
+            logger.error("Error calculating relevance score for doc {}: {}", docId, e.getMessage());
         }
         
-        // Limit snippet length
-        if (bestParagraph.length() > 200) {
-            bestParagraph = bestParagraph.substring(0, 197) + "...";
+        return score;
+    }
+    
+    /**
+     * Extracts the first meaningful paragraph from text
+     */
+    private String getFirstParagraph(String text) {
+        if (text == null || text.isEmpty()) {
+            return "";
         }
         
-        return bestParagraph;
+        // Split by paragraph breaks and find first non-empty paragraph
+        String[] paragraphs = text.split("\n\n|\r\n\r\n");
+        for (String paragraph : paragraphs) {
+            String trimmed = paragraph.trim();
+            if (trimmed.length() > 50) { // Meaningful paragraph should be at least 50 chars
+                return trimmed;
+            }
+        }
+        
+        // Fall back to the first 200 characters if no good paragraph is found
+        return text.length() > 200 ? text.substring(0, 200) : text;
+    }
+    
+    /**
+     * Count occurrences of a term in text
+     */
+    private int countOccurrences(String text, String term) {
+        int count = 0;
+        int index = 0;
+        while ((index = text.indexOf(term, index)) != -1) {
+            count++;
+            index += term.length();
+        }
+        return count;
+    }
+    
+    private String generateSnippet(String content, List<String> stemmedWords) {
+        try {
+            // Parse HTML content
+            org.jsoup.nodes.Document parsedDoc = org.jsoup.Jsoup.parse(content);
+            String text = parsedDoc.text();
+            
+            if (text == null || text.isEmpty()) {
+                return "No content available";
+            }
+            
+            // Find the best paragraph containing the query words
+            String[] paragraphs = text.split("\\. ");
+            
+            if (paragraphs.length == 0) {
+                return "No content available";
+            }
+            
+            // Find paragraph with most query term matches
+            int bestMatchCount = 0;
+            String bestParagraph = "";
+            
+            // Create a search phrase from all terms
+            String searchPhrase = String.join(" ", stemmedWords).toLowerCase();
+            
+            // First check for exact phrase match
+            for (String paragraph : paragraphs) {
+                if (paragraph != null && paragraph.length() >= 20) {
+                    String lowerParagraph = paragraph.toLowerCase();
+                    if (lowerParagraph.contains(searchPhrase)) {
+                        // Found exact phrase match - prioritize this paragraph
+                        bestParagraph = paragraph;
+                        bestMatchCount = stemmedWords.size() + 1; // Extra bonus to ensure this is picked
+                        break;
+                    }
+                }
+            }
+            
+            // If no exact phrase match, look for paragraph with most term matches
+            if (bestMatchCount == 0) {
+                for (String paragraph : paragraphs) {
+                    if (paragraph != null && paragraph.length() >= 20) {
+                        String lowerParagraph = paragraph.toLowerCase();
+                        
+                        int matchCount = 0;
+                        for (String word : stemmedWords) {
+                            if (word != null && !word.isEmpty() && lowerParagraph.contains(word.toLowerCase())) {
+                                matchCount++;
+                            }
+                        }
+                        
+                        if (matchCount > bestMatchCount) {
+                            bestMatchCount = matchCount;
+                            bestParagraph = paragraph;
+                        }
+                    }
+                }
+            }
+            
+            // If still no good match, use the first substantial paragraph
+            if (bestParagraph.isEmpty()) {
+                for (String paragraph : paragraphs) {
+                    if (paragraph != null && paragraph.length() >= 50) {
+                        bestParagraph = paragraph;
+                        break;
+                    }
+                }
+                
+                // If still empty, just use the first paragraph
+                if (bestParagraph.isEmpty() && paragraphs.length > 0 && paragraphs[0] != null) {
+                    bestParagraph = paragraphs[0];
+                }
+            }
+            
+            // Trim the paragraph if it's too long
+            if (bestParagraph.length() > 300) {
+                bestParagraph = bestParagraph.substring(0, 297) + "...";
+            }
+            
+            // Highlight the query terms in the snippet (bold them)
+            String snippet = bestParagraph;
+            for (String word : stemmedWords) {
+                if (word != null && !word.isEmpty()) {
+                    try {
+                        // Use case-insensitive replacement with regex, but handle special characters safely
+                        String safeWord = Pattern.quote(word);
+                        String regex = "(?i)\\b" + safeWord + "\\b";
+                        snippet = snippet.replaceAll(regex, "<strong>$0</strong>");
+                    } catch (Exception e) {
+                        // If regex fails, try simple replacement
+                        logger.debug("Regex replacement failed for term {}, using simple replace", word);
+                        String lowerSnippet = snippet.toLowerCase();
+                        String lowerWord = word.toLowerCase();
+                        
+                        int index = lowerSnippet.indexOf(lowerWord);
+                        while (index >= 0) {
+                            String original = snippet.substring(index, index + word.length());
+                            snippet = snippet.substring(0, index) + 
+                                    "<strong>" + original + "</strong>" + 
+                                    snippet.substring(index + word.length());
+                            
+                            // Move past this replacement
+                            index = lowerSnippet.indexOf(lowerWord, index + word.length() + 17); // +17 for the added HTML tags
+                        }
+                    }
+                }
+            }
+            
+            return snippet;
+        } catch (Exception e) {
+            logger.error("Error generating snippet: {}", e.getMessage());
+            return "Content preview unavailable";
+        }
     }
     
     private double calculateRelevanceScore(Long docId, List<String> stemmedWords) {
@@ -598,42 +1140,49 @@ public class QueryService {
         for (String word : stemmedWords) {
             Optional<Word> wordEntity = wordRepository.findByWord(word);
             if (wordEntity.isPresent()) {
-                // Calculate TF (term frequency)
-                Optional<InvertedIndex> indexEntry = invertedIndexRepository.findAll().stream()
-                    .filter(entry -> entry.getWord().getId().equals(wordEntity.get().getId()) && 
-                                   entry.getDocument().getId().equals(docId))
-                    .findFirst();
-                
-                if (indexEntry.isPresent()) {
-                    int termFreq = indexEntry.get().getFrequency();
+                try {
+                    // Calculate TF (term frequency) using direct SQL query
+                    Integer termFreq = jdbcTemplate.queryForObject(
+                        "SELECT frequency FROM inverted_index WHERE word_id = ? AND doc_id = ?",
+                        Integer.class, wordEntity.get().getId(), docId);
                     
-                    // Calculate IDF (inverse document frequency)
-                    long docsWithTerm = invertedIndexRepository.findAll().stream()
-                        .filter(entry -> entry.getWord().getId().equals(wordEntity.get().getId()))
-                        .count();
-                    double idf = Math.log10((double)totalDocs / (docsWithTerm + 1));
-                    
-                    // TF-IDF score
-                    double tfIdf = termFreq * idf;
-                    
-                    // Add to total score
-                    score += tfIdf;
-                    
-                    // Boost score for words in important tags (title, h1, etc.)
-                    List<WordDocumentTag> tags = wordDocumentTagRepository.findAll().stream()
-                        .filter(tag -> tag.getWord().getId().equals(wordEntity.get().getId()) && 
-                                     tag.getDocument().getId().equals(docId))
-                        .collect(Collectors.toList());
-                    
-                    for (WordDocumentTag tag : tags) {
-                        if (tag.getTag().equals("title")) {
-                            score += tfIdf * 3;
-                        } else if (tag.getTag().equals("h1")) {
-                            score += tfIdf * 2;
-                        } else if (tag.getTag().startsWith("h")) {
-                            score += tfIdf * 1.5;
+                    if (termFreq != null) {
+                        // Calculate IDF (inverse document frequency) using direct SQL query
+                        Long docsWithTerm = jdbcTemplate.queryForObject(
+                            "SELECT COUNT(*) FROM inverted_index WHERE word_id = ?",
+                            Long.class, wordEntity.get().getId());
+                        double idf = Math.log10((double)totalDocs / (docsWithTerm + 1));
+                        
+                        // TF-IDF score
+                        double tfIdf = termFreq * idf;
+                        
+                        // Add to total score
+                        score += tfIdf;
+                        
+                        // Boost score for words in important tags (title, h1, etc.)
+                        try {
+                            // Use direct SQL query to get tags for this word and document
+                            List<Map<String, Object>> wordDocTagList = jdbcTemplate.queryForList(
+                                "SELECT * FROM word_document_tags WHERE word_id = ? AND doc_id = ?",
+                                wordEntity.get().getId(), docId
+                            );
+                            
+                            for (Map<String, Object> tagData : wordDocTagList) {
+                                String tag = (String) tagData.get("tag");
+                                if (tag.equals("title")) {
+                                    score += tfIdf * 3;
+                                } else if (tag.equals("h1")) {
+                                    score += tfIdf * 2;
+                                } else if (tag.startsWith("h")) {
+                                    score += tfIdf * 1.5;
+                                }
+                            }
+                        } catch (Exception e) {
+                            logger.debug("Error getting tags for word {} in doc {}", word, docId);
                         }
                     }
+                } catch (Exception e) {
+                    logger.debug("Error calculating term frequency for word {} in doc {}", word, docId);
                 }
             }
         }
@@ -748,5 +1297,217 @@ public class QueryService {
         }
         
         return false;
+    }
+
+    private String extractDomainFromUrl(String url) {
+        try {
+            java.net.URI uri = new java.net.URI(url);
+            String host = uri.getHost();
+            if (host == null) {
+                return "";
+            }
+            return host.replaceFirst("^www\\.", "").replaceFirst("\\.[^\\.]+$", "");
+        } catch (Exception e) {
+            logger.error("Error extracting domain from URL: {}", e.getMessage());
+            return "";
+        }
+    }
+
+    /**
+     * Calculate term proximity for terms not appearing as an exact phrase
+     * Rewards documents where query terms appear close to each other
+     */
+    private double calculateTermProximity(String text, List<String> terms) {
+        double proximityScore = 0.0;
+        
+        try {
+            // Split text into words
+            String[] words = text.split("\\s+");
+            
+            // Find positions of each term
+            Map<String, List<Integer>> termPositions = new HashMap<>();
+            
+            for (String term : terms) {
+                termPositions.put(term.toLowerCase(), new ArrayList<>());
+            }
+            
+            // Scan document for term positions
+            for (int i = 0; i < words.length; i++) {
+                String word = words[i].toLowerCase();
+                for (String term : terms) {
+                    if (word.contains(term.toLowerCase())) {
+                        termPositions.get(term.toLowerCase()).add(i);
+                    }
+                }
+            }
+            
+            // Skip terms that don't appear
+            List<String> appearingTerms = terms.stream()
+                .filter(term -> !termPositions.get(term.toLowerCase()).isEmpty())
+                .collect(Collectors.toList());
+            
+            if (appearingTerms.size() < 2) {
+                return 0.0; // Need at least 2 terms for proximity
+            }
+            
+            // Find closest positions between terms
+            int minDistance = Integer.MAX_VALUE;
+            
+            // Compare each term with each other term
+            for (int i = 0; i < appearingTerms.size(); i++) {
+                for (int j = i + 1; j < appearingTerms.size(); j++) {
+                    List<Integer> positions1 = termPositions.get(appearingTerms.get(i).toLowerCase());
+                    List<Integer> positions2 = termPositions.get(appearingTerms.get(j).toLowerCase());
+                    
+                    // Find minimum distance between positions
+                    for (Integer pos1 : positions1) {
+                        for (Integer pos2 : positions2) {
+                            int distance = Math.abs(pos1 - pos2);
+                            minDistance = Math.min(minDistance, distance);
+                        }
+                    }
+                }
+            }
+            
+            // Calculate proximity score based on distance
+            if (minDistance < Integer.MAX_VALUE) {
+                if (minDistance <= 3) {
+                    // Terms very close together (within 3 words)
+                    proximityScore = 2.0;
+                } else if (minDistance <= 10) {
+                    // Terms somewhat close (within 10 words)
+                    proximityScore = 1.0;
+                } else if (minDistance <= 50) {
+                    // Terms in same general area
+                    proximityScore = 0.5;
+                }
+            }
+            
+        } catch (Exception e) {
+            logger.error("Error calculating term proximity: {}", e.getMessage());
+        }
+        
+        return proximityScore;
+    }
+    
+    /**
+     * Get semantic relations for terms (simplified synonym matching)
+     * In a real system, this would use a proper thesaurus or word embedding model
+     */
+    private Map<String, List<String>> getSemanticRelations() {
+        // Simple hardcoded semantic relations - in a real system would use an NLP model
+        Map<String, List<String>> relations = new HashMap<>();
+        
+        // Political terms
+        relations.put("election", Arrays.asList("vote", "ballot", "poll", "voting", "elect", "democratic"));
+        relations.put("vote", Arrays.asList("ballot", "election", "poll", "voting", "elect"));
+        relations.put("politics", Arrays.asList("political", "government", "governance", "policy"));
+        relations.put("president", Arrays.asList("presidential", "administration", "leader", "elect", "head"));
+        
+        // Countries and regions
+        relations.put("egypt", Arrays.asList("egyptian", "cairo", "africa", "north africa", "middle east"));
+        relations.put("us", Arrays.asList("usa", "united states", "america", "american"));
+        relations.put("uk", Arrays.asList("united kingdom", "britain", "british", "london"));
+        
+        // News terms
+        relations.put("news", Arrays.asList("report", "media", "press", "article"));
+        relations.put("war", Arrays.asList("conflict", "battle", "fighting", "combat", "warfare"));
+        relations.put("peace", Arrays.asList("ceasefire", "truce", "agreement", "treaty"));
+        
+        return relations;
+    }
+
+    /**
+     * Filter out low-quality search results that shouldn't be shown to users
+     */
+    private List<Map<String, Object>> filterLowQualityResults(
+            List<Map<String, Object>> results, 
+            List<String> stemmedWords,
+            List<String> phrases) {
+            
+        // Simple filtering - just remove obvious product pages for non-product queries
+        boolean isProductQuery = false;
+        Set<String> productTerms = Set.of("buy", "price", "shop", "store", "product", "purchase");
+        
+        for (String term : stemmedWords) {
+            if (productTerms.contains(term.toLowerCase())) {
+                isProductQuery = true;
+                break;
+            }
+        }
+        
+        // If it's not a product query, filter out e-commerce results
+        if (!isProductQuery) {
+            return results.stream()
+                .filter(result -> {
+                    // Get the URL and title
+                    String url = (String) result.get("url");
+                    String title = (String) result.get("title");
+                    
+                    if (url == null || title == null) {
+                        return false;
+                    }
+                    
+                    // Basic product page detection
+                    boolean isBasicProductPage = 
+                        url.contains("/product/") || 
+                        url.contains("/shop/product") ||
+                        url.contains("product-") ||
+                        url.contains("apple.com/shop");
+                    
+                    return !isBasicProductPage;
+                })
+                .collect(Collectors.toList());
+        }
+        
+        // For other queries, keep all results
+        return results;
+    }
+    
+    /**
+     * Generate suggested related queries based on search results
+     */
+    private List<String> generateSuggestedQueries(String originalQuery, List<Map<String, Object>> results) {
+        Set<String> suggestions = new HashSet<>();
+        
+        // Extract words from titles of top results
+        int maxResultsToAnalyze = Math.min(5, results.size());
+        Set<String> commonTerms = new HashSet<>();
+        
+        for (int i = 0; i < maxResultsToAnalyze; i++) {
+            String title = (String) results.get(i).get("title");
+            if (title == null) continue;
+            
+            // Extract significant terms from title
+            String[] titleWords = title.toLowerCase().split("\\s+");
+            for (String word : titleWords) {
+                if (word.length() > 3 && !stopWords.contains(word)) {
+                    commonTerms.add(word);
+                }
+            }
+        }
+        
+        // Build suggested queries by combining original query with common terms
+        String query = originalQuery.toLowerCase();
+        for (String term : commonTerms) {
+            // Skip terms already in the query
+            if (query.contains(term)) continue;
+            
+            // Add new suggestions
+            suggestions.add(query + " " + term);
+            
+            // If query has spaces, also suggest with the first word replaced
+            if (query.contains(" ")) {
+                String[] queryParts = query.split("\\s+", 2);
+                if (queryParts.length > 1) {
+                    suggestions.add(term + " " + queryParts[1]);
+                }
+            }
+        }
+        
+        // Convert to list and limit to top 5
+        return suggestions.stream()
+                .limit(5)
+                .collect(Collectors.toList());
     }
 } 

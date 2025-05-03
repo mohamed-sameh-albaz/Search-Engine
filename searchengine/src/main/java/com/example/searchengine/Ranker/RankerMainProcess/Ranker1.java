@@ -39,9 +39,10 @@ public class Ranker1 {
     // Final ranking variables
     private double[] finalRankScores;
     private int[] finalDocs;
-    // Weight factors
-    private final double RELEVANCE_WEIGHT = 0.7;
-    private final double PAGERANK_WEIGHT = 0.3;
+    // Weight factors - adjusted for better relevance
+    private final double RELEVANCE_WEIGHT = 0.75;
+    private final double PAGERANK_WEIGHT = 0.15;
+    private final double TERM_DENSITY_WEIGHT = 0.10;
     
     // Repositories/Services
     private DocumentsRepository documentsRepository;
@@ -169,7 +170,53 @@ public class Ranker1 {
                     RelevanceScore[i] += (tf * idf);
                 }
             }
+            
+            // Boost score if document contains all search terms
+            boolean hasAllTerms = true;
+            for (int j = 0; j < numTerms; j++) {
+                if (DocTermsFreqs[i][j] == 0) {
+                    hasAllTerms = false;
+                    break;
+                }
+            }
+            
+            if (hasAllTerms && numTerms > 1) {
+                RelevanceScore[i] *= 1.5; // 50% boost for documents containing all terms
+            }
         }
+    }
+
+    /**
+     * Calculate term density score to favor documents with more concentrated query terms
+     */
+    private double[] calculateTermDensityScore(String[] searchTerms) {
+        double[] termDensityScores = new double[(int) numDocs];
+        
+        for (int i = 0; i < numDocs; i++) {
+            // Skip if document has no terms
+            if (DocTerms[i] == 0) {
+                continue;
+            }
+            
+            // Calculate term density - how concentrated are the search terms in this doc
+            long totalTermFreq = 0;
+            for (int j = 0; j < numTerms; j++) {
+                totalTermFreq += DocTermsFreqs[i][j];
+            }
+            
+            // Term density = total occurrences of search terms / total terms in document
+            double density = (double) totalTermFreq / DocTerms[i];
+            
+            // Proximity bonus for terms appearing close together (estimated by density)
+            termDensityScores[i] = density * 100; // Scale up for better weighting
+            
+            // Bonus for documents with very high term density
+            if (density > 0.05) { // More than 5% of terms are search terms
+                termDensityScores[i] *= 1.2;
+            }
+        }
+        
+        return termDensityScores;
     }
 
     public void calculatePageRank() {
@@ -243,17 +290,35 @@ public class Ranker1 {
     }
 
     /**
-     * Calculate final ranking by combining relevance and PageRank
+     * Calculate final ranking by combining relevance, PageRank, and term density
      */
     public void calculateFinalRank(String[] searchTerms) {
         // Calculate individual scores
         calculateRelevanceScore(searchTerms);
         calculatePageRank();
+        double[] termDensityScores = calculateTermDensityScore(searchTerms);
+        
+        // Normalize scores to [0,1] range for fair weighting
+        double maxRelevance = 0.000001; // Avoid division by zero
+        double maxPageRank = 0.000001;
+        double maxTermDensity = 0.000001;
+        
+        for (int i = 0; i < numDocs; i++) {
+            maxRelevance = Math.max(maxRelevance, RelevanceScore[i]);
+            maxPageRank = Math.max(maxPageRank, pageRankScores[i]);
+            maxTermDensity = Math.max(maxTermDensity, termDensityScores[i]);
+        }
         
         // Combine scores with weights
         finalRankScores = new double[(int) numDocs];
         for (int i = 0; i < numDocs; i++) {
-            finalRankScores[i] = RELEVANCE_WEIGHT * RelevanceScore[i] + PAGERANK_WEIGHT * pageRankScores[i];
+            double normalizedRelevance = RelevanceScore[i] / maxRelevance;
+            double normalizedPageRank = pageRankScores[i] / maxPageRank;
+            double normalizedTermDensity = termDensityScores[i] / maxTermDensity;
+            
+            finalRankScores[i] = RELEVANCE_WEIGHT * normalizedRelevance + 
+                                PAGERANK_WEIGHT * normalizedPageRank +
+                                TERM_DENSITY_WEIGHT * normalizedTermDensity;
         }
     }
 
