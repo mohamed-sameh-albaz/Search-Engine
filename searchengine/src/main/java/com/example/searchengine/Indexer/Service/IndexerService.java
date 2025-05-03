@@ -1,13 +1,13 @@
 package com.example.searchengine.Indexer.Service;
 
-import com.example.searchengine.Crawler.Entities.Document;
-import com.example.searchengine.Indexer.Entities.InvertedIndex;
-import com.example.searchengine.Indexer.Entities.Word;
-import com.example.searchengine.Indexer.Entities.WordDocumentTag;
-import com.example.searchengine.Crawler.Repository.DocumentRepository;
-import com.example.searchengine.Indexer.Repository.InvertedIndexRepository;
-import com.example.searchengine.Indexer.Repository.WordDocumentTagRepository;
-import com.example.searchengine.Indexer.Repository.WordRepository;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Element;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -16,8 +16,14 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDateTime;
-import java.util.*;
+import com.example.searchengine.Crawler.Entities.Document;
+import com.example.searchengine.Crawler.Repository.DocumentRepository;
+import com.example.searchengine.Indexer.Entities.InvertedIndex;
+import com.example.searchengine.Indexer.Entities.Word;
+import com.example.searchengine.Indexer.Entities.WordDocumentTag;
+import com.example.searchengine.Indexer.Repository.InvertedIndexRepository;
+import com.example.searchengine.Indexer.Repository.WordDocumentTagRepository;
+import com.example.searchengine.Indexer.Repository.WordRepository;
 
 @Service
 public class IndexerService {
@@ -309,6 +315,7 @@ public class IndexerService {
         }
         long maxId = Collections.max(docCnt.keySet());
         long[] freqArray = new long[(int) (maxId + 1)];
+
         for (Map.Entry<Long, Long> entry : docCnt.entrySet()) {
             freqArray[entry.getKey().intValue()] = entry.getValue();
         }

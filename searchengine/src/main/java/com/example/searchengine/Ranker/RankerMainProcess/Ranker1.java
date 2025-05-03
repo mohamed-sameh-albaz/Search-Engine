@@ -16,21 +16,25 @@ import com.example.searchengine.Crawler.Repository.DocumentsRepository;
 import com.example.searchengine.Crawler.CrawlerMainProcess.CrawlerMainProcess;
 import com.example.searchengine.Indexer.Service.IndexerService; 
 
+
 public class Ranker1 {
 
+    public static final int MAX_DOCS = 6010; // Assuming a maximum of 6000 documents
     long[] FreqSearchTerms;
     Map<String, Map<Long, Integer>> index;
-    long[] DocTerms = new long[6000]; // Assuming a maximum of 6000 documents
+    long[] DocTerms = new long[MAX_DOCS]; // Assuming a maximum of 6000 documents
     long[][] DocTermsFreqs;
     long numDocs = 6000;
     long numTerms;
     double[] RelevanceScore;
+    int [] docIdToIndex;
     // ==========================================================================
     double[] pageRankScores;
     double dampingFactor = 0.85; // Damping factor for PageRank algorithm
     int maxIterations = 100;
     int[][] adjacencyMatrix;
-    long[] OutDegree;
+    int[] OutDegree;
+
     // ==========================================================================
     double[] finalRankScores;
     int[] finalDocs;
@@ -45,13 +49,50 @@ public class Ranker1 {
     IndexerService indexerService;
     public Ranker1() {
          Map<String, Map<Long, Integer>> index = indexerService.getInvertedIndex();
-         long DocTerms[] = indexerService.getDocumentCntArray();
-         int[][] adjacencyMatrix = crawlerMainProcess.relationMatrix();
+         Map<Long,Long> docandterms= indexerService.getDocumentCnt();
+         Map<Long,Map<Long,Integer>> rbd = crawlerMainProcess.relationBetweenDocs();
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+         // Create a map where key is the key of the inner map and value is 0,1,2,...
+         // Create an array to hold the keys of docandterms map
+        docIdToIndex = new int[docandterms.size()];
+        int idx = 0;
+        for (Long docId : docandterms.keySet()) {
+          docIdToIndex[idx++] = docId.intValue();
+        }
+
+        Map<Long, Integer> docIdToIdxMap = new java.util.HashMap<>();
+        idx = 0;
+        for (Long docId : docandterms.keySet()) {
+            docIdToIdxMap.put(docId, idx++);
+        }
+
+
+        long[] docTermCounts = new long[docandterms.size()];
+        idx = 0;
+        for (Long count : docandterms.values()) {
+            docTermCounts[idx++] = count;
+        }
+
+        int [][] adjacencyMatrix2 = new int[MAX_DOCS][MAX_DOCS];
+        for (Map.Entry<Long, Map<Long, Integer>> entry : rbd.entrySet()) {
+            Long docId = entry.getKey();
+            Map<Long, Integer> relatedDocs = entry.getValue();
+            int docIndex = docIdToIdxMap.get(docId);
+            for (Map.Entry<Long, Integer> relatedDocEntry : relatedDocs.entrySet()) {
+                Long relatedDocId = relatedDocEntry.getKey();
+                int relatedDocIndex = docIdToIdxMap.get(relatedDocId);
+                adjacencyMatrix2[docIndex][relatedDocIndex] = 1; // Assuming a link exists
+            }
+        }
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        
 
          this.index = index;
-         this.DocTerms = DocTerms;
-         this.numDocs = DocTerms.length;
-         this.adjacencyMatrix = adjacencyMatrix;
+         this.DocTerms= docTermCounts;
+         this.numDocs = docTermCounts.length;
+         this.adjacencyMatrix = adjacencyMatrix2;
 
         // =========================================================================
         // calc doc terms
@@ -68,9 +109,9 @@ public class Ranker1 {
         for (int i = 0; i < numDocs; i++) {
             pageRankScores[i] = 1.0 / numDocs; // Initialize scores uniformly
         }
-        this.OutDegree = new long[(int) numDocs];
+        this.OutDegree = new int[(int) numDocs];
         for (int i = 0; i < numDocs; i++) {
-            // OutDegree[i] = getOutDegree(adjacencyMatrix, i); // Calculate out-degree for
+             OutDegree[i] = getOutDegree(adjacencyMatrix, i); // Calculate out-degree for
             // each node
         }
         // =========================================================================
@@ -87,7 +128,7 @@ public class Ranker1 {
                 if (termFreqs == null) {
                     DocTermsFreqs[i][j] = 0;
                 } else {
-                    DocTermsFreqs[i][j] = termFreqs.getOrDefault(i, 0);
+                    DocTermsFreqs[i][j] = termFreqs.getOrDefault((long) docIdToIndex[i], 0);
                 }
                 if (DocTermsFreqs[i][j] > 0) {
                     FreqSearchTerms[j]++;
@@ -122,7 +163,7 @@ public class Ranker1 {
         }
     }
 
-    private int getOutDegree(double[][] adjacencyMatrix, int node) {
+    private int getOutDegree(int[][] adjacencyMatrix, int node) {
         int outDegree = 0;
         for (int j = 0; j < numDocs; j++) {
             if (adjacencyMatrix[node][j] > 0) {
@@ -178,7 +219,12 @@ public class Ranker1 {
     public int[] getFinalDocs(String[] searchTerms) {
 
         generateFinalDocs(searchTerms);
-        return finalDocs;
+        // Convert the finalDocs array to a list of document IDs
+        int[] finalDocs2 = new int[finalDocs.length];
+        for (int i = 0; i < finalDocs.length; i++) {
+            finalDocs2[i] = docIdToIndex[finalDocs[i]];
+        }
+        return finalDocs2;
     }
 
     // ==========================================================================
