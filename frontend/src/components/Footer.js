@@ -20,7 +20,7 @@ const Links = styled.div`
 
 const Footer = () => (
   <FooterStyled>
-    <p>Search Beyond the Stars</p>
+    <p>Search Engine</p>
     <Links>
       <a href="#">About</a> | <a href="#">Privacy</a> | <a href="#">Tools</a>
     </Links>

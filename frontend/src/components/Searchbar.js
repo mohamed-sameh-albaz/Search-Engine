@@ -1,92 +1,241 @@
 // components/Searchbar.js
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import styled from 'styled-components';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 
 const SearchContainer = styled.div`
-  position: absolute;
-  top: 25%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  max-width: 600px;
+  margin: ${props => props.$isHomePage ? '0 auto' : '10px 0'};
+  position: relative;
+`;
+
+const SearchForm = styled.div`
+  display: flex;
+  width: 100%;
+  position: relative;
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.15);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+  transition: all 0.3s ease;
+  overflow: hidden;
+  
+  &:hover, &:focus-within {
+    background: rgba(255, 255, 255, 0.25);
+    box-shadow: 0 4px 25px rgba(155, 89, 182, 0.3);
+  }
 `;
 
 const Input = styled.input`
-  width: 400px;
-  padding: 15px;
+  flex: 1;
+  padding: ${props => props.$isHomePage ? '18px 24px' : '14px 20px'};
   border: none;
-  border-radius: 25px;
-  background: rgba(255, 255, 255, 0.1);
+  background: transparent;
   color: #fff;
-  font-size: 18px;
+  font-size: ${props => props.$isHomePage ? '18px' : '16px'};
   outline: none;
-  transition: width 0.3s ease, box-shadow 0.3s ease;
-
-  &:focus {
-    width: 500px;
-    box-shadow: 0 0 15px rgba(155, 89, 182, 0.8);
-  }
-`;
-
-const Button = styled.button`
-  padding: 10px 20px;
-  margin-left: 10px;
-  background: #9b59b6;
-  border: none;
-  border-radius: 25px;
-  color: #fff;
-  cursor: pointer;
-  transition: transform 0.2s ease;
-
-  &:hover {
-    transform: scale(1.1);
-  }
-`;
-
-const Autocomplete = styled.div`
-  position: absolute;
   width: 100%;
-  background: rgba(255, 255, 255, 0.2);
-  border-radius: 0 0 10px 10px;
-  color: #fff;
-  display: ${props => (props.$visible ? 'block' : 'none')};
+  font-family: 'Roboto', sans-serif;
+  
+  &::placeholder {
+    color: rgba(255, 255, 255, 0.8);
+  }
 `;
 
-const SearchBar = () => {
-  const [query, setQuery] = useState('');
-  const [isFocused, setIsFocused] = useState(false);
-  const navigate = useNavigate();
+const ClearButton = styled.button`
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  padding: 0 15px;
+  display: ${props => props.$show ? 'flex' : 'none'};
+  align-items: center;
+  justify-content: center;
+  transition: color 0.2s ease;
+  
+  &:hover {
+    color: rgba(255, 255, 255, 1);
+  }
+`;
 
-  const handleSearch = () => {
+const SearchButton = styled.button`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 60px;
+  background: rgba(155, 89, 182, 0.7);
+  border: none;
+  border-radius: 0 24px 24px 0;
+  color: white;
+  cursor: pointer;
+  transition: background 0.2s ease;
+  
+  &:hover {
+    background: rgba(155, 89, 182, 0.9);
+  }
+`;
+
+const VoiceButton = styled.button`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 50px;
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  transition: color 0.2s ease;
+  
+  &:hover {
+    color: rgba(255, 255, 255, 1);
+  }
+`;
+
+const VoiceRecognition = styled.div`
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 15px;
+  background: rgba(155, 89, 182, 0.3);
+  padding: 15px;
+  border-radius: 12px;
+  text-align: center;
+  display: ${props => props.$show ? 'block' : 'none'};
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+  
+  p {
+    margin: 0;
+    font-size: 14px;
+    color: white;
+  }
+  
+  h3 {
+    margin: 5px 0;
+    color: white;
+  }
+`;
+
+const SearchBar = ({ isResults }) => {
+  const [query, setQuery] = useState('');
+  const [isListening, setIsListening] = useState(false);
+  const [transcript, setTranscript] = useState('');
+  const navigate = useNavigate();
+  const location = useLocation();
+  const isHomePage = location.pathname === '/';
+  
+  // Get query from URL if on results page
+  useEffect(() => {
+    if (!isHomePage) {
+      const params = new URLSearchParams(location.search);
+      const urlQuery = params.get('q');
+      if (urlQuery) {
+        setQuery(urlQuery);
+      }
+    }
+  }, [location, isHomePage]);
+  
+  const handleSearch = (e) => {
+    if (e) e.preventDefault();
     if (query.trim()) {
       navigate(`/search?q=${encodeURIComponent(query)}`);
     }
   };
-
-  const handleKeyPress = (e) => {
-    if (e.key === 'Enter' && query.trim()) {
-      navigate(`/search?q=${encodeURIComponent(query)}`);
+  
+  const handleClear = () => {
+    setQuery('');
+    if (!isHomePage) {
+      navigate('/');
+    }
+  };
+  
+  const toggleVoiceRecognition = () => {
+    if (!isListening) {
+      setIsListening(true);
+      startVoiceRecognition();
+    } else {
+      setIsListening(false);
+      stopVoiceRecognition();
+    }
+  };
+  
+  const startVoiceRecognition = () => {
+    if ('webkitSpeechRecognition' in window) {
+      const recognition = new window.webkitSpeechRecognition();
+      recognition.continuous = false;
+      recognition.interimResults = true;
+      
+      recognition.onresult = (event) => {
+        const current = event.resultIndex;
+        const result = event.results[current][0].transcript;
+        setTranscript(result);
+      };
+      
+      recognition.onend = () => {
+        if (transcript) {
+          setQuery(transcript);
+          setIsListening(false);
+          setTimeout(() => {
+            handleSearch();
+          }, 1000);
+        } else {
+          setIsListening(false);
+        }
+      };
+      
+      recognition.start();
+      window.recognition = recognition;
+    } else {
+      alert('Speech recognition is not supported in your browser');
+      setIsListening(false);
+    }
+  };
+  
+  const stopVoiceRecognition = () => {
+    if (window.recognition) {
+      window.recognition.stop();
     }
   };
 
   return (
-    <SearchContainer>
-      <Input
-        type="text"
-        placeholder="Search..."
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        onFocus={() => setIsFocused(true)}
-        onBlur={() => setIsFocused(false)}
-        onKeyPress={handleKeyPress}
-      />
-      <Button onClick={handleSearch}>Go</Button>
-      <Autocomplete $visible={isFocused && query.length > 0}>
-        <p>Suggestion 1</p>
-        <p>Suggestion 2</p>
-      </Autocomplete>
+    <SearchContainer $isHomePage={isHomePage}>
+      <SearchForm as="form" onSubmit={handleSearch}>
+        <Input 
+          type="text"
+          placeholder={isHomePage ? 'Search... (Try "term1" OR "term2")' : 'Search...'}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          $isHomePage={isHomePage}
+        />
+        {query && (
+          <ClearButton 
+            type="button" 
+            onClick={handleClear}
+            $show={query.length > 0}
+          >
+            ✕
+          </ClearButton>
+        )}
+        <VoiceButton 
+          type="button" 
+          onClick={toggleVoiceRecognition}
+        >
+          🎤
+        </VoiceButton>
+        <SearchButton type="submit">
+          🔍
+        </SearchButton>
+      </SearchForm>
+      
+      <VoiceRecognition $show={isListening}>
+        <p>Say something...</p>
+        {transcript && <h3>{transcript}</h3>}
+      </VoiceRecognition>
     </SearchContainer>
   );
 };
 
-export default SearchBar; // Changed from SearchResults to SearchBar
+export default SearchBar;

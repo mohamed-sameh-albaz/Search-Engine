@@ -4,21 +4,28 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.net.URI;
+import java.net.URL;
 import java.net.URLEncoder;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Hashtable;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.jsoup.Connection;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -42,34 +49,155 @@ public class CrawlerMainProcess {
     static AtomicInteger count = new AtomicInteger(0);
     private static final int MAX_DOCUMENTS = 6000; // Configurable limit
     private static boolean stopFlag = false;
+    private static boolean isRunning = false;
+    private static final String USER_AGENT = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
+    private Set<String> robotChecked = Collections.synchronizedSet(new HashSet<>());
+    private Set<String> excludedLinks = Collections.synchronizedSet(new HashSet<>());
     Thread[] threads;
+    private static long startTime = 0;
 
-    // CrawlerMainProcess(DocumentsRepository documentsRepository,
-    // RelatedLinksRepository relatedLinksRepository) {
-    // this.documentsRepository = documentsRepository;
-    // this.relatedLinksRepository = relatedLinksRepository;
-    // }
-
-    // private int seedLinksCount = 0;i n?
-    @PostMapping
-    public void startCrawling(@RequestParam(required = true, defaultValue = "0") int thread_num) {
-        count.set(0);
-        threads = new Thread[thread_num];
-        for (int i = 0; i < thread_num; i++) {
-            threads[i] = new Thread(() -> crawl());
+    @GetMapping("/status")
+    public Map<String, Object> getStatus() {
+        Map<String, Object> status = new HashMap<>();
+        int totalDocuments = serveDataBase.getAllVisited().size();
+        
+        status.put("isRunning", isRunning);
+        status.put("documentCount", totalDocuments);
+        status.put("maxDocuments", MAX_DOCUMENTS);
+        
+        if (isRunning) {
+            status.put("activeThreads", getActiveThreadCount());
+            status.put("elapsedTimeSeconds", (System.currentTimeMillis() - startTime) / 1000);
+            status.put("crawledInThisSession", count.get());
         }
-        for (int i = 0; i < thread_num; i++) {
-            threads[i].start();
-        }
-        for (int i = 0; i < thread_num; i++) {
-            try {
-                threads[i].join();
-            } catch (InterruptedException e) {
-                e.printStackTrace();
+        
+        return status;
+    }
+    
+    private int getActiveThreadCount() {
+        if (threads == null) return 0;
+        
+        int active = 0;
+        for (Thread thread : threads) {
+            if (thread != null && thread.isAlive()) {
+                active++;
             }
         }
+        return active;
+    }
 
-        // relationBetweenDocs();
+    @GetMapping
+    public Map<String, Object> startCrawlingGet(@RequestParam(required = true, defaultValue = "4") int thread_num) {
+        Map<String, Object> response = new HashMap<>();
+        
+        if (isRunning) {
+            response.put("status", "Crawler is already running");
+            response.put("activeThreads", getActiveThreadCount());
+            return response;
+        }
+        
+        count.set(0);
+        stopFlag = false;
+        isRunning = true;
+        startTime = System.currentTimeMillis();
+        
+        int initialCount = serveDataBase.getAllVisited().size();
+        response.put("initialDocumentCount", initialCount);
+        
+        threads = new Thread[thread_num];
+        for (int i = 0; i < thread_num; i++) {
+            final int threadId = i;
+            threads[i] = new Thread(() -> {
+                try {
+                    crawl();
+                } catch (Exception e) {
+                    System.err.println("Error in crawler thread " + threadId + ": " + e.getMessage());
+                    e.printStackTrace();
+                } finally {
+                    if (getActiveThreadCount() == 0) {
+                        isRunning = false;
+                    }
+                }
+            });
+            threads[i].setDaemon(true);
+            threads[i].start();
+        }
+        
+        response.put("status", "Crawler started with " + thread_num + " threads");
+        response.put("message", "Crawling in progress. Check your database for new documents.");
+        
+        return response;
+    }
+
+    @PostMapping
+    public Map<String, Object> startCrawling(@RequestParam(required = true, defaultValue = "4") int thread_num) {
+        Map<String, Object> response = new HashMap<>();
+        
+        if (isRunning) {
+            response.put("status", "Crawler is already running");
+            response.put("activeThreads", getActiveThreadCount());
+            return response;
+        }
+        
+        // Validate seed links before starting crawler
+        String[] seedLinks = ReadseedLinks();
+        if (seedLinks == null || seedLinks.length == 0) {
+            response.put("status", "error");
+            response.put("message", "No seed links available. Check seedlinks.txt file.");
+            return response;
+        }
+        
+        // Test first seed link to ensure connectivity
+        try {
+            String testUrl = seedLinks[0];
+            Connection.Response testResponse = Jsoup.connect(testUrl)
+                .userAgent(USER_AGENT)
+                .header("Accept-Language", "*")
+                .timeout(5000)
+                .method(Connection.Method.HEAD)
+                .execute();
+                
+            response.put("testConnection", "Successful - " + testUrl + " returned status " + testResponse.statusCode());
+        } catch (Exception e) {
+            response.put("status", "warning");
+            response.put("testConnection", "Failed - " + e.getMessage());
+            // Continue anyway, as other seeds might work
+        }
+        
+        // Clear state for fresh crawl (optional, remove if you want to resume)
+        stopFlag = false;
+        isRunning = true;
+        startTime = System.currentTimeMillis();
+        count.set(0);
+        
+        int initialCount = serveDataBase.getAllVisited().size();
+        response.put("initialDocumentCount", initialCount);
+        response.put("seedLinksCount", seedLinks.length);
+        
+        // Configure and start crawler threads
+        threads = new Thread[thread_num];
+        for (int i = 0; i < thread_num; i++) {
+            final int threadId = i;
+            threads[i] = new Thread(() -> {
+                try {
+                    crawl();
+                } catch (Exception e) {
+                    System.err.println("Error in crawler thread " + threadId + ": " + e.getMessage());
+                    e.printStackTrace();
+                } finally {
+                    if (getActiveThreadCount() == 0) {
+                        isRunning = false;
+                    }
+                }
+            });
+            threads[i].setDaemon(true);
+            threads[i].start();
+        }
+        
+        response.put("status", "Crawler started with " + thread_num + " threads");
+        response.put("message", "Crawling in progress using " + seedLinks.length + " seed URLs.");
+        
+        return response;
     }
 
     public String[] ReadseedLinks() {
@@ -77,227 +205,387 @@ public class CrawlerMainProcess {
             File file = new File("seedlinks.txt");
             BufferedReader Reader = new BufferedReader(new FileReader(file));
             String line = null;
-            String[] seedLinks = new String[15];
-            for (int i = 0; i < 15; i++) {
-                line = Reader.readLine();
-                if (line == null) {
-                    break;
+            List<String> seedLinksList = new ArrayList<>();
+            
+            while ((line = Reader.readLine()) != null) {
+                if (!line.trim().isEmpty()) {
+                    seedLinksList.add(line.trim());
                 }
-                seedLinks[i] = line;
             }
+            
             Reader.close();
+            
+            String[] seedLinks = new String[seedLinksList.size()];
+            seedLinksList.toArray(seedLinks);
+            
+            System.out.println("Successfully read " + seedLinks.length + " seed links");
             return seedLinks;
         } catch (Exception e) {
-            System.out.println("Error writing to file: " + e.getMessage());
+            System.out.println("Error reading seed links: " + e.getMessage());
+            e.printStackTrace();
+            return new String[] {
+                "https://en.wikipedia.org",
+                "https://www.bbc.com"
+            };
         }
-        return null;
+    }
+
+    public void checkRobotsTxt(String baseUrl) {
+        try {
+            URL realUrl = new URL(baseUrl);
+            String robotUrl = realUrl.getProtocol() + "://" + realUrl.getHost() + "/robots.txt";
+            
+            synchronized (this.robotChecked) {
+                if (robotChecked.contains(robotUrl))
+                    return;
+                System.out.println("Reading Excluded Links from: " + robotUrl);
+                robotChecked.add(robotUrl);
+            }
+
+            Connection.Response response = Jsoup.connect(robotUrl)
+                    .userAgent(USER_AGENT)
+                    .header("Accept-Language", "*")
+                    .execute();
+                    
+            if (response.statusCode() > 399) {
+                return;
+            }
+            
+            String robotsTxt = response.parse().text();
+            String[] lines = robotsTxt.split(" ");
+            boolean toExclude = false;
+            
+            for (int i = 0; i < lines.length; i++) {
+                if (lines[i].compareTo("User-agent:") == 0 && lines[i + 1].compareTo("*") == 0) {
+                    toExclude = true;
+                } else if (lines[i].compareTo("User-agent:") == 0 && lines[i + 1].compareTo("*") != 0) {
+                    toExclude = false;
+                }
+                if (toExclude && lines[i - 1].compareTo("Disallow:") == 0) {
+                    String disallowedPath;
+                    if (lines[i].startsWith("/")) {
+                        disallowedPath = realUrl.getProtocol() + "://" + realUrl.getHost() + lines[i];
+                    } else {
+                        disallowedPath = realUrl.getProtocol() + "://" + realUrl.getHost() + '/' + lines[i];
+                    }
+                    synchronized (this.excludedLinks) {
+                        excludedLinks.add(disallowedPath);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // Silently ignore errors with robots.txt
+        }
+    }
+
+    public boolean isAllowedByRobots(String url) {
+        try {
+            URL urlObj = new URL(url);
+            String baseUrl = urlObj.getProtocol() + "://" + urlObj.getHost();
+            
+            if (!robotChecked.contains(baseUrl + "/robots.txt")) {
+                checkRobotsTxt(baseUrl);
+            }
+            
+            for (String disallowed : excludedLinks) {
+                if (url.startsWith(disallowed)) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (Exception e) {
+            return true; // Allow if there's an error
+        }
     }
 
     public void crawl() {
-        int seedLinksCount = 15;
-        String urlFromSeed[] = ReadseedLinks();
+        String[] urlFromSeed = ReadseedLinks();
+        int seedLinksCount = urlFromSeed.length;
         BlockingQueue<com.example.searchengine.Crawler.Entities.Document> queue = new LinkedBlockingQueue<>();
-        Hashtable<String, com.example.searchengine.Crawler.Entities.Document> documents = new Hashtable<>();
         ConcurrentHashMap<String, com.example.searchengine.Crawler.Entities.Document> visitedUrls = new ConcurrentHashMap<>();
         List<com.example.searchengine.Crawler.Entities.Document> crawlers = new ArrayList<>();
-        RelatedLinksID relatedLinksID = null;
-        RelatedLinks relatedLinks = null;
-        Object lockVisitedUrls = new Object();
-        Object lockQueue = new Object();
-        Object lockDocuments = new Object();
 
-        synchronized (lockDocuments) {
+        // First load existing documents from the database
+        try {
             crawlers = serveDataBase.getAllVisited();
-        }
-        synchronized (lockVisitedUrls) {
-            count.set(crawlers.size());
+            System.out.println("Loaded " + crawlers.size() + " existing documents from database");
+            
+            // Add existing documents to our tracking maps
             for (com.example.searchengine.Crawler.Entities.Document doc : crawlers) {
-                visitedUrls.put(doc.getUrl(), doc);
-                queue.add(doc);
+                if (doc.getUrl() != null) {
+                    visitedUrls.put(doc.getUrl(), doc);
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Error loading existing documents: " + e.getMessage());
+        }
+
+        // Process each seed URL separately to ensure they get crawled
+        for (int i = 0; i < seedLinksCount && !Thread.currentThread().isInterrupted() && !stopFlag; i++) {
+            String seedUrl = urlFromSeed[i];
+            System.out.println("Thread " + Thread.currentThread().getId() + " processing seed URL: " + seedUrl);
+            
+            // Skip seed URL if we've already crawled it
+            if (visitedUrls.containsKey(seedUrl)) {
+                System.out.println("Seed URL already visited: " + seedUrl);
+                continue;
+            }
+            
+            // Create a new document for this seed
+            com.example.searchengine.Crawler.Entities.Document seedDoc = null;
+            try {
+                // Check robots.txt for the seed URL's domain
+                checkRobotsTxt(seedUrl);
+                
+                if (!isAllowedByRobots(seedUrl)) {
+                    System.out.println("Seed URL not allowed by robots.txt: " + seedUrl);
+                    continue;
+                }
+                
+                // Normalize the URL
+                String normalizedUrl = normalizeURL(seedUrl);
+                if (normalizedUrl == null) {
+                    System.out.println("Failed to normalize seed URL: " + seedUrl);
+                    continue;
+                }
+                
+                // Create a document for this seed
+                seedDoc = new com.example.searchengine.Crawler.Entities.Document();
+                seedDoc.setUrl(normalizedUrl);
+                
+                // Try to fetch the content for the seed URL
+                try {
+                    Document jsoupDoc = Jsoup.connect(normalizedUrl)
+                        .userAgent(USER_AGENT)
+                        .header("Accept-Language", "*")
+                        .timeout(10000) // Use a longer timeout for seed URLs
+                        .get();
+                    
+                    String title = jsoupDoc.title();
+                    String content = jsoupDoc.html();
+                    seedDoc.setUrl(normalizedUrl);
+                    seedDoc.setTitle(title);
+                    seedDoc.setContent(content);
+                    seedDoc.setStatus("visited");
+                    
+                    // Save the seed document to the database
+                    serveDataBase.saveToDatabase(seedDoc);
+                    int newCount = count.incrementAndGet();
+                    System.out.println("Added seed URL to database: " + normalizedUrl + ", count: " + newCount);
+                    
+                    // Add to visited URLs to prevent re-crawling
+                    visitedUrls.put(normalizedUrl, seedDoc);
+                    
+                    // Add all links from this seed URL to the queue
+                    processLinksFromPage(jsoupDoc, normalizedUrl, seedDoc, queue, visitedUrls);
+                    
+                    // Process the queue until it's empty or we reach the maximum number of documents
+                    processQueue(queue, visitedUrls);
+                } catch (Exception e) {
+                    System.err.println("Error fetching seed URL " + normalizedUrl + ": " + e.getMessage());
+                }
+            } catch (Exception e) {
+                System.err.println("Error processing seed URL " + seedUrl + ": " + e.getMessage());
             }
         }
-        System.out.println("count: " + visitedUrls.size());
-        int i = 0;
-        while (i < seedLinksCount && !Thread.currentThread().isInterrupted() && !stopFlag) {
-            String seedUrl;
-            seedUrl = urlFromSeed[i++];
-            System.out.println("count: " + count);
-            if (!visitedUrls.contains(seedUrl)) {
-                com.example.searchengine.Crawler.Entities.Document doct = new com.example.searchengine.Crawler.Entities.Document();
-                doct.setUrl(seedUrl);
-                visitedUrls.put(doct.getUrl(), doct);
-                queue.add(doct);
-            }
+        System.out.println("Thread " + Thread.currentThread().getId() + " finished crawling");
+    }
 
-            while (queue.size() > 0) {
-                com.example.searchengine.Crawler.Entities.Document docElement;
-                String CurrentURL;
-                if (count.get() >= MAX_DOCUMENTS) {
-                    close();
+    private void processLinksFromPage(Document doc, String parentUrl, com.example.searchengine.Crawler.Entities.Document parentDoc, 
+                                    BlockingQueue<com.example.searchengine.Crawler.Entities.Document> queue,
+                                    ConcurrentHashMap<String, com.example.searchengine.Crawler.Entities.Document> visitedUrls) {
+        try {
+            URI parentUri = new URI(parentUrl);
+            Elements links = doc.getElementsByTag("a");
+            
+            for (Element link : links) {
+                if (count.get() >= MAX_DOCUMENTS || Thread.currentThread().isInterrupted() || stopFlag) {
                     return;
                 }
-                if (queue.size() == 0)
-                    break;
-                docElement = queue.poll();
-                CurrentURL = docElement.getUrl();
-                CurrentURL = CurrentURL.replace(" ", "%20").replace("\"", "%22").replace(",", "%2C");
+                
+                String linkUrl = link.attr("href");
+                if (linkUrl.isEmpty() || linkUrl.charAt(0) == '#') {
+                    continue;
+                }
+                
                 try {
-                    Document doc;
-                    doc = Jsoup.connect(CurrentURL).get();
-                    String title = doc.title();
-                    String content = doc.html();
-                    docElement.setUrl(CurrentURL);
-                    docElement.setTitle(title);
-                    docElement.setContent(content);
-
-                    if (docElement.getStatus() == null) {
-                        docElement.setStatus("visited");
-                        serveDataBase.saveToDatabase(docElement);
-                        int newcount = count.incrementAndGet();
-                        if (newcount >= MAX_DOCUMENTS) {
-                            close();
-                            return;
-                        }
-                        System.out.println("added to data base " + docElement.getUrl());
-
+                    URI resolvedUri = new URI(linkUrl);
+                    resolvedUri = parentUri.resolve(resolvedUri);
+                    String finalUrl = normalizeURL(resolvedUri.toString());
+                    
+                    if (finalUrl == null) {
+                        continue;
                     }
-
-                    URI parentUrl = new URI(CurrentURL);
-                    Elements links = doc.getElementsByTag("a");
-
-                    for (Element link : links) {
-                        String finalUrl = null;
-                        String Linkurl = link.attr("href");
-                        Linkurl = Linkurl.replace(" ", "%20").replace("\"", "%22").replace(",", "%2C");
-                        URI resolvedUrI = new URI(Linkurl);
-                        resolvedUrI = parentUrl.resolve(resolvedUrI);
-                        finalUrl = Normalization(resolvedUrI);
-                        try {
-                            serveDataBase.saveRelatedLinks(parentUrl.toString(), finalUrl);
-                        } catch (Exception e) {
-                            System.out.println("Error saving related links: " + e.getMessage());
+                    
+                    // Save the relationship between parent and child
+                    try {
+                        serveDataBase.saveRelatedLinks(parentUrl.toString(), finalUrl);
+                    } catch (Exception e) {
+                        // Just log and continue
+                        System.out.println("Error saving related links: " + e.getMessage());
+                    }
+                    
+                    // Add to queue if not visited
+                    if (!visitedUrls.containsKey(finalUrl) && isAllowedByRobots(finalUrl)) {
+                        com.example.searchengine.Crawler.Entities.Document childDoc = new com.example.searchengine.Crawler.Entities.Document();
+                        childDoc.setUrl(finalUrl);
+                        childDoc.setStatus("to_visit");
+                        if (parentDoc.getId() != null) {
+                            childDoc.setParentDocId(parentDoc.getId());
                         }
-
-                        if (!visitedUrls.containsKey(finalUrl) && RobotsCheck.isAllowed(finalUrl)) {
-
-                            System.out.println("Added to visited URLs: " + finalUrl);
-                            com.example.searchengine.Crawler.Entities.Document docSub = new com.example.searchengine.Crawler.Entities.Document();
-
-                            doc = Jsoup.connect(finalUrl).get();
-                            String titlechild = doc.title();
-                            String contentchild = doc.html();
-
-                            docSub.setUrl(finalUrl);
-                            docSub.setTitle(doc.title());
-                            docSub.setContent(doc.html());
-                            docSub.setStatus("visited");
-                            docSub.setParentDocId(docElement.getId());
-                            try {
-
-                                serveDataBase.saveToDatabase(docSub);
-                                int newcount = count.incrementAndGet();
-                                if (newcount >= MAX_DOCUMENTS) {
-                                    close();
-                                    return;
-                                }
-                                visitedUrls.put(finalUrl, docSub);
-                                queue.add(docSub);
-                            } catch (Exception e) {
-                                System.out.println("Error saving child URL: " + e.getMessage());
-                            }
-                        }
+                        
+                        // Mark as visited before adding to queue to prevent duplicates
+                        visitedUrls.put(finalUrl, childDoc);
+                        queue.add(childDoc);
+                        
+                        System.out.println("Added to queue: " + finalUrl);
                     }
                 } catch (Exception e) {
-                    // count.decrementAndGet();
-                    System.out.println("Error fetching child URL: " + " - " + e.getMessage());
-
+                    // Just log and continue
+                    System.out.println("Error processing link " + linkUrl + ": " + e.getMessage());
                 }
-                if (count.get() >= MAX_DOCUMENTS) {
+            }
+        } catch (Exception e) {
+            System.err.println("Error processing links from " + parentUrl + ": " + e.getMessage());
+        }
+    }
+
+    private void processQueue(BlockingQueue<com.example.searchengine.Crawler.Entities.Document> queue,
+                             ConcurrentHashMap<String, com.example.searchengine.Crawler.Entities.Document> visitedUrls) {
+        while (!queue.isEmpty() && !Thread.currentThread().isInterrupted() && !stopFlag) {
+            if (count.get() >= MAX_DOCUMENTS) {
+                close();
+                return;
+            }
+            
+            com.example.searchengine.Crawler.Entities.Document docElement = queue.poll();
+            if (docElement == null) continue;
+            
+            String currentUrl = docElement.getUrl();
+            if (currentUrl == null) continue;
+            
+            // Skip if the URL was already processed while in the queue
+            if (docElement.getStatus() != null && docElement.getStatus().equals("visited")) {
+                continue;
+            }
+            
+            try {
+                Document jsoupDoc = Jsoup.connect(currentUrl)
+                    .userAgent(USER_AGENT)
+                    .header("Accept-Language", "*")
+                    .timeout(5000)
+                    .get();
+                
+                String title = jsoupDoc.title();
+                String content = jsoupDoc.html();
+                docElement.setUrl(currentUrl);
+                docElement.setTitle(title);
+                docElement.setContent(content);
+                docElement.setStatus("visited");
+                
+                // Save to database
+                serveDataBase.saveToDatabase(docElement);
+                int newCount = count.incrementAndGet();
+                System.out.println("Added to database: " + currentUrl + ", count: " + newCount);
+                
+                if (newCount >= MAX_DOCUMENTS) {
                     close();
                     return;
                 }
+                
+                // Process links from this page
+                processLinksFromPage(jsoupDoc, currentUrl, docElement, queue, visitedUrls);
+            } catch (Exception e) {
+                System.out.println("Error crawling " + currentUrl + ": " + e.getMessage());
             }
-
         }
-
-        System.out.println("Crawling completed for");
-
     }
 
     public void close() {
-        if (!stopFlag) {
-            stopFlag = true;
-            for (int i = 0; i < threads.length; i++) {
-                threads[i].interrupt();
+        stopFlag = true;
+        isRunning = false;
+        System.out.println("Crawler is stopping...");
+        for (Thread thread : threads) {
+            if (thread != null && thread.isAlive()) {
+                thread.interrupt();
             }
         }
     }
 
-    // normalization method to remove the duplicate links and to remove the
-    // unnecessary parts of the URL
-    public String Normalization(URI url) {
-        // Check if the URL is valid and not already processed
-        String urlString = url.toString();
-        if (url == null || url.getHost() == null) {
+    public String normalizeURL(String url) {
+        if (url == null || url.isEmpty() || url.charAt(0) == '#' || url.length() == 1)
             return null;
-        }
 
-        String protocol = url.getScheme().toLowerCase();
-        String token = url.getHost().toLowerCase();
-        String portPart = (url.getPort() == -1 || protocol == "https" || protocol == "http") ? "" : ":" + url.getPort();
-        String path = url.getRawPath() == null ? "" : url.getRawPath().toLowerCase();
-        String query = url.getRawQuery() == null ? "" : url.getRawQuery();
-        String fragment = url.getRawFragment() == null ? "" : "#" + url.getRawFragment();
-        // edit path
-        String editedpath = path;
-        editedpath = editedpath.replaceAll("%2e", ".");
-        editedpath = editedpath.replaceAll("%2f", "/");
+        try {
+            url = url.toLowerCase();
+            URL baseUrl = new URL(url);
+            String protocol = baseUrl.getProtocol();
+            String host = baseUrl.getHost();
+            String path = baseUrl.getPath();
+            String query = baseUrl.getQuery() != null ? baseUrl.getQuery() : "";
 
-        editedpath = editedpath.replaceAll("/[^/]+/\\.\\./", "/");
-        editedpath = editedpath.replaceAll("/\\.", "");
-        editedpath = editedpath.replaceAll("/{2,}", "/");
-        if (!path.equals("/") && path.endsWith("/")) {
-            editedpath = editedpath.substring(0, editedpath.length() - 1);
-            editedpath = editedpath.replaceAll("/+$", "/");
-        }
-        urlString = urlString.replace(path, editedpath);
-        // edit query
-        StringBuilder editedquery = new StringBuilder();
-        String[] params = query.split("&");
-        Arrays.sort(params);
+            if (!query.isEmpty()) {
+                String[] queryParams = query.split("&");
+                Arrays.sort(queryParams);
+                StringBuilder sortedQuery = new StringBuilder();
+                for (int i = 0; i < queryParams.length; i++) {
+                    sortedQuery.append(queryParams[i]);
+                    if (i != queryParams.length - 1) {
+                        sortedQuery.append("&");
+                    }
+                }
+                query = sortedQuery.toString();
+            }
 
-        for (String param : params) {
-            String[] toencode = param.split("=", 2);
-            if (param.length() == 2) {
-                try {
-                    String encoded = toencode[1];
-                    encoded = URLEncoder.encode(encoded, "UTF-8");
-                    System.out.println("encoded: " + encoded);
-                    param = param.replace(toencode[1], encoded);
-                } catch (java.io.UnsupportedEncodingException e) {
-                    System.out.println("Encoding error: " + e.getMessage());
+            if (!host.startsWith("www.") && !host.equals("localhost")) {
+                host = "www." + host;
+            }
+
+            StringBuilder normalizedPath = new StringBuilder();
+            boolean lastWasSlash = false;
+            for (char c : path.toCharArray()) {
+                if (c == '/') {
+                    if (!lastWasSlash) {
+                        normalizedPath.append(c);
+                    }
+                    lastWasSlash = true;
+                } else {
+                    normalizedPath.append(c);
+                    lastWasSlash = false;
                 }
             }
-            editedquery.append(param).append("&");
+            path = normalizedPath.toString();
+
+            for (int i = 0; i < path.length(); i++) {
+                if (path.charAt(i) == '%' && i + 2 < path.length()) {
+                    try {
+                        int num = Integer.parseInt(path.substring(i + 1, i + 3), 16);
+                        path = path.substring(0, i) + (char) num + path.substring(i + 3);
+                    } catch (NumberFormatException e) {
+                        // Ignore invalid encoding
+                    }
+                }
+            }
+
+            String normalizedUrl = protocol + "://" + host + path;
+            if (!query.isEmpty()) {
+                normalizedUrl += "?" + query;
+            }
+
+            return normalizedUrl;
+        } catch (Exception e) {
+            return null;
         }
-        if (editedquery.length() > 0) {
-            editedquery.deleteCharAt(editedquery.length() - 1); // Remove the last '&'
-        }
-        urlString = urlString.replace(query, editedquery.toString());
-        urlString = urlString.replace(fragment, "");
-        return urlString;
     }
 
     public Map<Long, Map<Long, Integer>> relationBetweenDocs() {
-        Map<Long, Map<Long, Integer>> relationMap = new Hashtable<>(); // Use ConcurrentHashMap for thread safety
+        Map<Long, Map<Long, Integer>> relationMap = new Hashtable<>();
         Map<Long, Integer> childDocIdMap = new Hashtable<>();
-        List<Object[]> relatedLinksIDs = relatedLinksRepository.getRelatedLinksIDs(); // Fetch related links IDs from
-                                                                                      // the database
+        List<Object[]> relatedLinksIDs = relatedLinksRepository.getRelatedLinksIDs();
         for (Object[] row : relatedLinksIDs) {
-            Long childDocId = (Long) row[1]; // Assuming the second column is childDocId
-            Long parentDocId = (Long) row[0]; // Assuming the first column is parentDocId
-            relationMap.computeIfAbsent(parentDocId, k -> new Hashtable<>()).put(childDocId, 1); // Initialize with 1 if
-                                                                                                 // not present
+            Long childDocId = (Long) row[1];
+            Long parentDocId = (Long) row[0];
+            relationMap.computeIfAbsent(parentDocId, k -> new Hashtable<>()).put(childDocId, 1);
         }
         for (Map.Entry<Long, Map<Long, Integer>> entry : relationMap.entrySet()) {
             Long parentDocId = entry.getKey();
@@ -307,13 +595,11 @@ public class CrawlerMainProcess {
                 System.out.println("  Child Doc ID: " + childEntry.getKey() + ", Value: " + childEntry.getValue());
             }
         }
-        return relationMap; // Return the map containing the relationships between documents
-        // Add the relationship to the map
-
+        return relationMap;
     }
 
     public int[][] relationMatrix() {
-        Map<Long, Map<Long, Integer>> relationMap = relationBetweenDocs(); // Get the relationship map
+        Map<Long, Map<Long, Integer>> relationMap = relationBetweenDocs();
         int size = 6000;
         int[][] matrix = new int[size][size];
         for (Map.Entry<Long, Map<Long, Integer>> parentEntry : relationMap.entrySet()) {

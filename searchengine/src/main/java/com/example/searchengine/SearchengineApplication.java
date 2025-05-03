@@ -22,6 +22,11 @@ import java.util.Map;
 import org.springframework.data.domain.Page;
 import io.github.cdimascio.dotenv.Dotenv;
 import jakarta.transaction.Transactional;
+import org.springframework.context.annotation.Bean;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+import org.springframework.web.filter.CorsFilter;
+import java.util.Arrays;
 
 @SpringBootApplication
 public class SearchengineApplication implements CommandLineRunner {
@@ -37,6 +42,9 @@ public class SearchengineApplication implements CommandLineRunner {
 
     @Autowired
     private PreIndexer preIndexer;
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
 
     public static void main(String[] args) {
         Dotenv dotenv = Dotenv.configure()
@@ -55,7 +63,7 @@ public class SearchengineApplication implements CommandLineRunner {
         // maintenanceService.vacuumDatabase();
         if (!documentsToIndex.isEmpty()) {
             System.out.println("Re-indexing " + documentsToIndex.size() + "documents...");
-            // indexerService.buildIndex(documentsToIndex);
+             indexerService.buildIndex(documentsToIndex);
         } else {
             System.out.println("No documents found to re-index.");
         }
@@ -81,5 +89,21 @@ public class SearchengineApplication implements CommandLineRunner {
         // }
 
         return documentsToIndex;
+    }
+
+    @Bean
+    public CorsFilter corsFilter() {
+        CorsConfiguration corsConfiguration = new CorsConfiguration();
+        corsConfiguration.setAllowCredentials(true);
+        corsConfiguration.setAllowedOrigins(Arrays.asList("http://localhost:3000"));
+        corsConfiguration.setAllowedHeaders(Arrays.asList("Origin", "Access-Control-Allow-Origin", "Content-Type",
+                "Accept", "Authorization", "Origin, Accept", "X-Requested-With",
+                "Access-Control-Request-Method", "Access-Control-Request-Headers"));
+        corsConfiguration.setExposedHeaders(Arrays.asList("Origin", "Content-Type", "Accept", "Authorization",
+                "Access-Control-Allow-Origin", "Access-Control-Allow-Origin", "Access-Control-Allow-Credentials"));
+        corsConfiguration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS"));
+        UrlBasedCorsConfigurationSource urlBasedCorsConfigurationSource = new UrlBasedCorsConfigurationSource();
+        urlBasedCorsConfigurationSource.registerCorsConfiguration("/**", corsConfiguration);
+        return new CorsFilter(urlBasedCorsConfigurationSource);
     }
 }

@@ -15,6 +15,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.dao.DataIntegrityViolationException;
 
 import com.example.searchengine.Crawler.Entities.Document;
 import com.example.searchengine.Crawler.Repository.DocumentRepository;
@@ -108,7 +109,7 @@ public class IndexerService {
 
     }
 
-    @Transactional
+    @Transactional(noRollbackFor = DataIntegrityViolationException.class)
     private void indexPage(String url, String html) {
         System.out.println("hello from the indexer");
         org.jsoup.nodes.Document doc = Jsoup.parse(html); // parse the html
@@ -146,20 +147,33 @@ public class IndexerService {
                         wordRepository.flush();
                         return now;
                     });
-            jdbcTemplate.update(
-                    "UPDATE words SET total_frequency = total_frequency + ? WHERE id = ?",
-                    info.totalFrequency, word.getId());
-
-            jdbcTemplate.update(
-                    "INSERT INTO inverted_index (word_id, doc_id, frequency) VALUES (?, ?, ?) ",
-                    word.getId(), documentEntity.getId(), info.totalFrequency);
-
-            for (Map.Entry<String, Integer> tagEntry : info.tagFrequencies.entrySet()) {
-                String tag = tagEntry.getKey();
-                int tagFrequency = tagEntry.getValue();
+            
+            try {
+                // Update word total frequency
                 jdbcTemplate.update(
-                        "INSERT INTO word_document_tags (word_id, doc_id, tag, frequency) VALUES (?, ?, ?, ?) ",
-                        word.getId(), documentEntity.getId(), tag, tagFrequency);
+                        "UPDATE words SET total_frequency = total_frequency + ? WHERE id = ?",
+                        info.totalFrequency, word.getId());
+
+                // Insert into inverted_index with ON CONFLICT DO UPDATE
+                jdbcTemplate.update(
+                        "INSERT INTO inverted_index (word_id, doc_id, frequency) VALUES (?, ?, ?) " +
+                        "ON CONFLICT (word_id, doc_id) DO UPDATE SET frequency = inverted_index.frequency + EXCLUDED.frequency",
+                        word.getId(), documentEntity.getId(), info.totalFrequency);
+
+                // Process each tag
+                for (Map.Entry<String, Integer> tagEntry : info.tagFrequencies.entrySet()) {
+                    String tag = tagEntry.getKey();
+                    int tagFrequency = tagEntry.getValue();
+
+                    // Insert into word_document_tags with ON CONFLICT DO UPDATE
+                    jdbcTemplate.update(
+                            "INSERT INTO word_document_tags (word_id, doc_id, tag, frequency) VALUES (?, ?, ?, ?) " +
+                            "ON CONFLICT (word_id, doc_id, tag) DO UPDATE SET frequency = word_document_tags.frequency + EXCLUDED.frequency",
+                            word.getId(), documentEntity.getId(), tag, tagFrequency);
+                }
+            } catch (Exception e) {
+                // Log error but continue processing other words
+                System.err.println("Error indexing word " + wordText + " in document " + url + ": " + e.getMessage());
             }
         }
     }
@@ -267,13 +281,10 @@ public class IndexerService {
                 List<InvertedIndex> mappings = invertedIndexRepository.findByWord(word,
                         PageRequest.of(0, Integer.MAX_VALUE));
 
+                Map<Long, Integer> docFreqs = index.computeIfAbsent(word.getWord(), k -> new HashMap<>());
                 for (InvertedIndex mapping : mappings) {
-                    Map<Long, Integer> docFreq = new HashMap<>();
-
-                    docFreq.put(mapping.getDocument().getId(), mapping.getFrequency());
-                    index.put(mapping.getWord().getWord(), docFreq);
+                    docFreqs.put(mapping.getDocument().getId(), mapping.getFrequency());
                 }
-
             }
             page++;
         }
@@ -323,3 +334,4 @@ public class IndexerService {
     }
 
 }
+
