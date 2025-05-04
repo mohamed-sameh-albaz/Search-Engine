@@ -47,14 +47,20 @@ public class PhraseSearching {
             DocumentsRepository documentRepository,
             HashSet<String> stopWords) {
         
-        this.phrase = phrase.toLowerCase();
+        // Make sure we have a clean phrase without quotes
+        if (phrase.startsWith("\"") && phrase.endsWith("\"") && phrase.length() > 2) {
+            this.phrase = phrase.substring(1, phrase.length() - 1).toLowerCase();
+        } else {
+            this.phrase = phrase.toLowerCase();
+        }
+        
         this.jdbcTemplate = jdbcTemplate;
         this.wordRepository = wordRepository;
         this.documentRepository = documentRepository;
         this.stopWords = stopWords;
         
         // Split the phrase into terms
-        this.queryTerms = Arrays.asList(phrase.toLowerCase().split("\\s+"));
+        this.queryTerms = Arrays.asList(this.phrase.toLowerCase().split("\\s+"));
         
         // Execute the phrase search
         executeSearch();
@@ -95,7 +101,7 @@ public class PhraseSearching {
         }
         
         // Get documents containing the first word - LIMIT results to improve performance
-        final int MAX_CANDIDATE_DOCS = 100; // Limit candidate docs to process
+        final int MAX_CANDIDATE_DOCS = 1000; // Limit candidate docs to process
         List<Long> candidateDocIds = jdbcTemplate.query(
                 "SELECT DISTINCT doc_id FROM inverted_index WHERE word_id = ? LIMIT ?",
                 (rs, rowNum) -> rs.getLong("doc_id"),

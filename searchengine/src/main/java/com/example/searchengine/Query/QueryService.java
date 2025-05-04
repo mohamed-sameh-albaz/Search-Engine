@@ -84,7 +84,33 @@ public class QueryService {
             // Check if the query contains operators (AND, OR, NOT)
             Matcher operatorMatcher = OPERATOR_PATTERN.matcher(query);
             if (operatorMatcher.find()) {
-                // This is a complex query with operators
+                // Check if this is a complex phrase query (with quoted phrases and operators)
+                if (query.contains("\"")) {
+                    // Ensure the query has proper quoted phrases on both sides of the operator
+                    // Get the operator
+                    String operator = operatorMatcher.group(1).toUpperCase();
+                    // Split by operator
+                    String[] parts = OPERATOR_PATTERN.split(query);
+                    
+                    if (parts.length == 2) {
+                        String leftPart = parts[0].trim();
+                        String rightPart = parts[1].trim();
+                        
+                        // Check if both parts have quoted phrases
+                        boolean leftHasQuotedPhrase = leftPart.contains("\"");
+                        boolean rightHasQuotedPhrase = rightPart.contains("\"");
+                        
+                        // Only process if both parts have quoted phrases (for AND, OR)
+                        // or if at least the left part has a quoted phrase (for NOT)
+                        if ((leftHasQuotedPhrase && rightHasQuotedPhrase) || 
+                            (leftHasQuotedPhrase && operator.equals("NOT"))) {
+                            logger.info("Processing as complex phrase query with operator: {}", query);
+                            return processComplexPhraseQuery(query, result);
+                        }
+                    }
+                }
+                
+                // This is a complex query with operators but not a phrase query
                 processComplexQuery(query, result);
                 return result;
             }
@@ -698,11 +724,11 @@ public class QueryService {
             } else {
                 // For single term queries, use all matching docs but limit total
                 finalDocs = new HashSet<>(docMatchCounts.keySet());
-                if (finalDocs.size() > 100) {
+                if (finalDocs.size() > 1000) {
                     // If too many results, just take 100 random ones
                     List<Long> docList = new ArrayList<>(finalDocs);
                     Collections.shuffle(docList);
-                    finalDocs = new HashSet<>(docList.subList(0, 100));
+                    finalDocs = new HashSet<>(docList.subList(0, 1000));
                 }
             }
         }
@@ -1739,5 +1765,81 @@ public class QueryService {
         QueryResult result = processQuery(query);
         List<Map<String, Object>> results = result.getResults();
         return results != null ? results.size() : 0;
+    }
+
+    /**
+     * Process a complex phrase query that uses operators (AND, OR, NOT) between phrases
+     * Example: "Football player" OR "Tennis player"
+     */
+    private QueryResult processComplexPhraseQuery(String query, QueryResult result) {
+        logger.info("Processing complex phrase query: '{}'", query);
+        
+        // Create instance of ComplexPhraseSearching with all necessary dependencies
+        ComplexPhraseSearching complexSearcher = new ComplexPhraseSearching(
+            query,
+            jdbcTemplate,
+            wordRepository,
+            documentRepository,
+            stopWords
+        );
+        
+        // Get the sorted results
+        List<Long> matchingDocIds = complexSearcher.getSortedDocumentIds();
+        Map<Long, Double> docScores = complexSearcher.getResults();
+        
+        // Add the phrases to the result
+        List<String> phrases = complexSearcher.getPhrases();
+        result.setPhrases(phrases);
+        
+        // Set the operator
+        result.setOperator(complexSearcher.getOperator());
+        
+        // Create mapping for matching documents
+        Map<String, List<Long>> matchingDocuments = new HashMap<>();
+        for (String phrase : phrases) {
+            matchingDocuments.put(phrase, matchingDocIds);
+        }
+        result.setMatchingDocuments(matchingDocuments);
+        
+        // Create stemmed words for snippet generation
+        List<String> stemmedWords = new ArrayList<>();
+        for (String phrase : phrases) {
+            // Add each individual word from the phrase
+            stemmedWords.addAll(
+                Arrays.stream(phrase.split("\\s+"))
+                    .map(this::stemWord)
+                    .filter(w -> !w.isEmpty())
+                    .collect(Collectors.toList())
+            );
+        }
+        result.setStemmedWords(stemmedWords);
+        
+        // Fetch full document details with snippets
+        List<Map<String, Object>> searchResults = fetchDocumentDetails(stemmedWords, matchingDocIds);
+        
+        // Add scores from complex phrase searcher
+        for (Map<String, Object> doc : searchResults) {
+            Long docId = ((Number) doc.get("id")).longValue();
+            doc.put("score", docScores.getOrDefault(docId, 0.0));
+        }
+        
+        // Sort by relevance score
+        searchResults.sort((r1, r2) -> 
+            Double.compare(
+                ((Number) r2.get("score")).doubleValue(),
+                ((Number) r1.get("score")).doubleValue()
+            )
+        );
+        
+        // Apply final filtering
+        if (!searchResults.isEmpty()) {
+            searchResults = filterLowQualityResults(searchResults, stemmedWords, phrases);
+            result.setSuggestedQueries(generateSuggestedQueries(query, searchResults));
+        }
+        
+        result.setResults(searchResults);
+        logger.info("Complex phrase search completed with {} results", searchResults.size());
+        
+        return result;
     }
 } 

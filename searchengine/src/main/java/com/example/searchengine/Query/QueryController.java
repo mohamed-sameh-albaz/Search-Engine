@@ -192,7 +192,7 @@ public class QueryController {
 
     
 
-    
+
     @GetMapping("/voice-search")
     public ResponseEntity<Map<String, Object>> voiceSearch(@RequestParam String query) {
         // For now, just delegate to the standard search with special tracking for voice

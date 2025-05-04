@@ -325,7 +325,7 @@ const SearchResults = () => {
     startItem: 0,
     endItem: 0
   });
-  const resultsPerPage = 10;
+  const resultsPerPage = 25;
   
   const location = useLocation();
   const navigate = useNavigate();
@@ -335,6 +335,7 @@ const SearchResults = () => {
   const searchSessionId = queryParams.get('sid') || null;
 
   const [isPhraseQuery, setIsPhraseQuery] = useState(false);
+  const [isComplexPhraseQuery, setIsComplexPhraseQuery] = useState(false);
 
   useEffect(() => {
     if (!query) {
@@ -408,6 +409,7 @@ const SearchResults = () => {
       setResults(searchResponse.data.results || []);
       setTotalResults(searchResponse.data.totalResults || 0);
       setIsPhraseQuery(searchResponse.data.isPhraseQuery || false);
+      setIsComplexPhraseQuery(searchResponse.data.isComplexPhraseQuery || false);
       
       // Store the session ID for future pagination
       const newSessionId = searchResponse.data.sessionId;
@@ -603,7 +605,10 @@ const SearchResults = () => {
               <> using {getOperatorDisplay()} operation</>
             )} 
             {isPhraseQuery && <PhraseQueryIndicator>Exact phrase search</PhraseQueryIndicator>}
-            for "{query}" {renderResultRankingInfo()}
+            {(isPhraseQuery || isComplexPhraseQuery) && (
+              <> for "{query}"</>
+            )}
+            {renderResultRankingInfo()}
           </SearchInfo>
         )}
         
