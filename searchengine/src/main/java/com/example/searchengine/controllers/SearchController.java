@@ -221,7 +221,7 @@ public class SearchController {
 
             // Get total results count
             int totalResults = isPhraseQuery || isComplexPhraseQuery ?
-                    Math.min(cacheEntry.totalResults, 100) :
+                    Math.min(cacheEntry.totalResults, 1000) :
                     cacheEntry.totalResults;
 
             int totalPages = (int) Math.ceil((double) totalResults / pageSize);

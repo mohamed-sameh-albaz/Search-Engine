@@ -72,130 +72,67 @@ public class QueryService {
 
     public QueryResult processQuery(String query) {
         logger.info("Processing query: {}", query);
-        
+
         QueryResult result = new QueryResult();
         result.setOriginalQuery(query);
-        
+
         try {
-            List<String> phrases = new ArrayList<>();
-            List<String> stemmedWords = new ArrayList<>();
-            Map<String, List<Long>> matchingDocuments = new HashMap<>();
-            
             // Check if the query contains operators (AND, OR, NOT)
             Matcher operatorMatcher = OPERATOR_PATTERN.matcher(query);
             if (operatorMatcher.find()) {
-                // Check if this is a complex phrase query (with quoted phrases and operators)
-                if (query.contains("\"")) {
-                    // Ensure the query has proper quoted phrases on both sides of the operator
-                    // Get the operator
-                    String operator = operatorMatcher.group(1).toUpperCase();
-                    // Split by operator
-                    String[] parts = OPERATOR_PATTERN.split(query);
-                    
-                    if (parts.length == 2) {
-                        String leftPart = parts[0].trim();
-                        String rightPart = parts[1].trim();
-                        
-                        // Check if both parts have quoted phrases
-                        boolean leftHasQuotedPhrase = leftPart.contains("\"");
-                        boolean rightHasQuotedPhrase = rightPart.contains("\"");
-                        
-                        // Only process if both parts have quoted phrases (for AND, OR)
-                        // or if at least the left part has a quoted phrase (for NOT)
-                        if ((leftHasQuotedPhrase && rightHasQuotedPhrase) || 
-                            (leftHasQuotedPhrase && operator.equals("NOT"))) {
-                            logger.info("Processing as complex phrase query with operator: {}", query);
-                            return processComplexPhraseQuery(query, result);
-                        }
+                // Ensure the query has proper quoted phrases on both sides of the operator
+                String operator = operatorMatcher.group(1).toUpperCase();
+                String[] parts = OPERATOR_PATTERN.split(query);
+
+                if (parts.length == 2) {
+                    String leftPart = parts[0].trim();
+                    String rightPart = parts[1].trim();
+
+                    // Check if both parts have quoted phrases
+                    boolean leftHasQuotedPhrase = leftPart.startsWith("\"") && leftPart.endsWith("\"");
+                    boolean rightHasQuotedPhrase = rightPart.startsWith("\"") && rightPart.endsWith("\"");
+
+                    if (leftHasQuotedPhrase && rightHasQuotedPhrase) {
+                        logger.info("Processing as complex phrase query with operator: {}", operator);
+                        return processComplexPhraseQuery(query, result);
+                    } else {
+                        logger.warn("Invalid query: Operators require both terms to be phrased.");
+                        result.setErrorMessage("Operators (AND, OR, NOT) require both terms to be enclosed in quotes.");
+                        return result;
                     }
                 }
-                
-                // This is a complex query with operators but not a phrase query
-                processComplexQuery(query, result);
-                return result;
             }
-            
-            // Simple query processing
-            boolean isPhraseQuery = false;
-            
-            // Handle exact phrase queries (the entire query is in quotes)
-            if (query.startsWith("\"") && query.endsWith("\"") && query.length() > 2) {
+
+            // Handle simple queries or phrase queries
+            boolean isPhraseQuery = query.startsWith("\"") && query.endsWith("\"");
+            if (isPhraseQuery) {
                 query = query.substring(1, query.length() - 1);
-                isPhraseQuery = true;
                 result.setPhraseQuery(true);
                 logger.info("Processing as exact phrase query: '{}'", query);
-                
-                // Use the new efficient phrase searching for full phrase queries
-                if (query.split("\\s+").length > 1) {
-                    return processFullPhraseQuery(query, result);
-                }
+                return processFullPhraseQuery(query, result);
             }
-            
-            // Extract phrases (text between quotes) if not already a phrase query
-            if (!isPhraseQuery) {
-                // Match quoted phrases with regex pattern
-                Matcher matcher = PHRASE_PATTERN.matcher(query);
-                
-                while (matcher.find()) {
-                    String phrase = matcher.group(1).trim();
-                    if (!phrase.isEmpty()) {
-                        phrases.add(phrase);
-                        // Also add single-word phrases as individual words for better matching
-                        if (!phrase.contains(" ")) {
-                            processRegularWords(phrase, stemmedWords, matchingDocuments);
-                        }
-                    }
-                }
-                
-                // Process non-phrase parts (text outside quotes)
-                String nonPhraseParts = query.replaceAll("\"[^\"]*\"", " ").trim();
-                processRegularWords(nonPhraseParts, stemmedWords, matchingDocuments);
-            } else {
-                // The entire query is a phrase
-                phrases.add(query);
-            }
-            
-            // Process phrases and get matching documents
-            for (String phrase : phrases) {
-                processPhraseSearch(phrase, matchingDocuments);
-                // Log the results for this phrase
-                List<Long> phraseDocs = matchingDocuments.getOrDefault(phrase, new ArrayList<>());
-                logger.info("Found {} documents matching phrase: '{}'", phraseDocs.size(), phrase);
-            }
-            
-            result.setPhrases(phrases);
+
+            // Process regular words
+            List<String> phrases = new ArrayList<>();
+            List<String> stemmedWords = new ArrayList<>();
+            Map<String, List<Long>> matchingDocuments = new HashMap<>();
+            processRegularWords(query, stemmedWords, matchingDocuments);
+
             result.setStemmedWords(stemmedWords);
             result.setMatchingDocuments(matchingDocuments);
-            
-            // Fetch the actual document results with snippets
-            List<Map<String, Object>> searchResults;
-            if (!isPhraseQuery || phrases.isEmpty()) {
-                searchResults = fetchRegularSearchResults(stemmedWords, matchingDocuments);
-            } else {
-                searchResults = fetchPhraseSearchResults(phrases.get(0), matchingDocuments);
-            }
-            
-            // Apply additional post-processing filters
-            if (!searchResults.isEmpty()) {
-                // Filter out low-quality results and e-commerce pages
-                searchResults = filterLowQualityResults(searchResults, stemmedWords, phrases);
-                
-                // Generate relevant suggested queries
-                result.setSuggestedQueries(generateSuggestedQueries(query, searchResults));
-            }
-            
+
+            // Fetch results
+            List<Map<String, Object>> searchResults = fetchRegularSearchResults(stemmedWords, matchingDocuments);
             result.setResults(searchResults);
-            
-            logger.info("Query processing completed with {} results", searchResults.size());
-            
+
         } catch (Exception e) {
             logger.error("Error processing query: {}", query, e);
-            result.setErrorMessage("An error occurred while processing your query");
+            result.setErrorMessage("An error occurred while processing your query.");
         }
-        
+
         return result;
     }
-    
+
     /**
      * Process a full phrase query using the optimized phrase searching implementation
      */
@@ -1842,4 +1779,4 @@ public class QueryService {
         
         return result;
     }
-} 
+}
