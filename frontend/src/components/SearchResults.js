@@ -370,7 +370,7 @@ const SearchResults = () => {
       
       // Fetch search results with session ID for consistent pagination
       console.log('Fetching search results for:', query);
-      const searchUrl = `${API_BASE_URL}/search?query=${encodeURIComponent(query)}&page=${page}&size=${resultsPerPage}`;
+      const searchUrl = `${API_BASE_URL}/query-search?query=${encodeURIComponent(query)}&page=${page}&pageSize=${resultsPerPage}`;
       const urlWithSession = currentSessionId ? `${searchUrl}&sessionId=${currentSessionId}` : searchUrl;
       
       const searchResponse = await axios.get(urlWithSession);
@@ -397,13 +397,19 @@ const SearchResults = () => {
         }
       }
       
+      // Calculate correct pagination information
+      const total = searchResponse.data.totalResults || 0;
+      const totalPages = Math.ceil(total / resultsPerPage);
+      const startItem = total > 0 ? (page - 1) * resultsPerPage + 1 : 0;
+      const endItem = Math.min(page * resultsPerPage, total);
+      
       // Set enhanced pagination information
       setPaginationInfo({
-        totalPages: searchResponse.data.totalPages || 0,
-        hasNextPage: searchResponse.data.hasNextPage || false,
-        hasPreviousPage: searchResponse.data.hasPreviousPage || false,
-        startItem: searchResponse.data.startItem || 0,
-        endItem: searchResponse.data.endItem || 0
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPreviousPage: page > 1,
+        startItem,
+        endItem
       });
       
       // Set suggested queries

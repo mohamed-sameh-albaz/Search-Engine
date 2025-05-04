@@ -11,6 +11,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.jsoup.Jsoup;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,88 +26,311 @@ import com.example.searchengine.Ranker.RankerMainProcess.Ranker1;
 public class RankerService {
 
     private final Ranker1 ranker;
-    private final DocumentsRepository documentRepository;
+    private final DocumentsRepository documentsRepository;
     
     @Autowired
-    public RankerService(Ranker1 ranker, DocumentsRepository documentRepository) {
+    public RankerService(Ranker1 ranker, DocumentsRepository documentsRepository) {
         this.ranker = ranker;
-        this.documentRepository = documentRepository;
+        this.documentsRepository = documentsRepository;
     }
     
     /**
-     * Ranks search results based on matching documents and query terms
-     * 
-     * @param matchingDocuments Map of query terms to matching document IDs
-     * @param stemmedWords List of stemmed query words
-     * @param phrases List of phrases in the query
-     * @param page Current page number (1-based)
+     * Rank matching documents based on search terms and return paginated results
+     * @param matchingDocs List of document IDs that match the search criteria
+     * @param searchTerms List of search terms (stemmed)
+     * @param phrases List of quoted phrases
+     * @param page Page number (1-based)
      * @param size Number of results per page
-     * @return List of ranked result objects
+     * @return List of ranked document objects with metadata
      */
-    public List<Map<String, Object>> rankResults(
-            Map<String, List<Long>> matchingDocuments,
-            List<String> stemmedWords,
-            List<String> phrases,
-            int page,
-            int size) {
+    public List<Map<String, Object>> rankResults(List<Long> matchingDocs, List<String> searchTerms, 
+                                               List<String> phrases, int page, int size) {
+        System.out.println("Ranking results for query with " + searchTerms.size() + 
+                         " terms and " + matchingDocs.size() + " matching documents");
         
-        // Get all matching document IDs
-        List<Long> allMatchingDocIds = new ArrayList<>();
-        for (List<Long> docIds : matchingDocuments.values()) {
-            allMatchingDocIds.addAll(docIds);
-        }
-        
-        // Remove duplicates
-        List<Long> uniqueDocIds = allMatchingDocIds.stream()
-                .distinct()
-                .collect(Collectors.toList());
-        
-        // If no matches, return empty list
-        if (uniqueDocIds.isEmpty()) {
+        // If no matching documents, return empty list
+        if (matchingDocs == null || matchingDocs.isEmpty()) {
             return Collections.emptyList();
         }
+
+        // Convert searchTerms and phrases to the format expected by the ranker
+        String[] termsArray = new String[searchTerms.size() + phrases.size()];
+        int index = 0;
         
-        // Convert stemmed words to array for ranker
-        String[] searchTerms = stemmedWords.toArray(new String[0]);
+        // Add regular terms
+        for (String term : searchTerms) {
+            termsArray[index++] = term;
+        }
         
-        // Get ranking scores using Ranker1
-        ranker.calculateFinalRank(searchTerms);
+        // Add quoted phrases (with quotes)
+        for (String phrase : phrases) {
+            termsArray[index++] = "\"" + phrase + "\"";
+        }
+        
+        // Get ranked document IDs from the ranker
+        int[] rankedDocIds = ranker.getFinalDocs(termsArray);
+        
+        // Convert to list of document objects with metadata
+        List<Map<String, Object>> results = new ArrayList<>();
         double[] scores = ranker.getFinalRankScores();
-        int[] rankedDocIds = ranker.getFinalDocs(searchTerms);
         
-        // Filter to only include docs that match the query
-        List<RankedResult> rankedResults = new ArrayList<>();
-        for (int i = 0; i < rankedDocIds.length; i++) {
-            int docId = rankedDocIds[i];
-            if (uniqueDocIds.contains((long)docId)) {
-                rankedResults.add(new RankedResult(docId, scores[i]));
+        // Calculate pagination bounds
+        int startIndex = (page - 1) * size;
+        int endIndex = Math.min(startIndex + size, rankedDocIds.length);
+        
+        // Track already seen URLs to avoid duplicates
+        Map<String, Boolean> seenUrls = new HashMap<>();
+        
+        // Create a map for quick document ID lookup
+        Map<Long, Document> documentCache = new HashMap<>();
+        
+        // Get all document IDs for batch retrieval, but limit the number to avoid memory issues
+        List<Long> docIdsToRetrieve = new ArrayList<>();
+        int maxDocsToRetrieve = Math.min(rankedDocIds.length, endIndex + 20);
+        maxDocsToRetrieve = Math.min(maxDocsToRetrieve, 500); // Hard limit to avoid OOM
+        
+        for (int i = 0; i < maxDocsToRetrieve; i++) {
+            if (i < rankedDocIds.length) {
+                docIdsToRetrieve.add((long) rankedDocIds[i]);
             }
         }
         
-        // Sort by score (highest first)
-        rankedResults.sort(Comparator.comparing(RankedResult::getScore).reversed());
-        
-        // Apply diversity-based reranking for better result distribution
-        rankedResults = applyDiversityReranking(rankedResults, searchTerms, 20);
-        
-        // Apply pagination - get total results first for improved pagination
-        List<RankedResult> allResults = new ArrayList<>(rankedResults);
-        
-        // Apply pagination
-        int startIndex = (page - 1) * size;
-        int endIndex = Math.min(startIndex + size, rankedResults.size());
-        
-        if (startIndex >= rankedResults.size()) {
-            return Collections.emptyList();
+        // Batch retrieve documents in smaller chunks to avoid memory issues
+        final int BATCH_SIZE = 50;
+        for (int batchStart = 0; batchStart < docIdsToRetrieve.size(); batchStart += BATCH_SIZE) {
+            int batchEnd = Math.min(batchStart + BATCH_SIZE, docIdsToRetrieve.size());
+            List<Long> batchIds = docIdsToRetrieve.subList(batchStart, batchEnd);
+            
+            Iterable<Document> documents = documentsRepository.findAllById(batchIds);
+            for (Document doc : documents) {
+                documentCache.put(doc.getId(), doc);
+            }
         }
         
-        List<RankedResult> pagedResults = rankedResults.subList(startIndex, endIndex);
+        System.out.println("Preparing paginated results: page " + page + 
+                         ", size " + size + ", startIndex " + startIndex + 
+                         ", endIndex " + endIndex);
         
-        // Convert to final result format with document details
-        return pagedResults.stream()
-                .map(result -> convertToResultMap(result, stemmedWords))
-                .filter(map -> map != null)
-                .collect(Collectors.toList());
+        int resultCount = 0;
+        for (int i = startIndex; i < endIndex && i < rankedDocIds.length; i++) {
+            // Get actual document ID
+            long docId = rankedDocIds[i];
+            
+            // Skip negative IDs (invalid)
+            if (docId < 0) {
+                continue;
+            }
+            
+            // Try to get document from cache first
+            Document doc = documentCache.get(docId);
+            
+            // If not in cache, fetch individually
+            if (doc == null) {
+                Optional<Document> docOpt = documentsRepository.findById(docId);
+                if (!docOpt.isPresent()) {
+                    System.err.println("Document ID " + docId + " not found in database");
+                    continue;
+                }
+                doc = docOpt.get();
+            }
+            
+            // Check for duplicates
+            String url = doc.getUrl();
+            if (url == null || seenUrls.containsKey(url)) {
+                continue;
+            }
+            seenUrls.put(url, true);
+            
+            // Create result object
+            Map<String, Object> result = createResultObject(doc, i + 1, scores[i], termsArray);
+            results.add(result);
+            resultCount++;
+            
+            // Break if we have enough results for this page
+            if (resultCount >= size) {
+                break;
+            }
+        }
+        
+        return results;
+    }
+    
+    /**
+     * Create a result object with metadata for a document
+     */
+    private Map<String, Object> createResultObject(Document doc, int rank, double score, String[] searchTerms) {
+        Map<String, Object> result = new HashMap<>();
+        
+        // Basic document info
+        result.put("docId", doc.getId());
+        result.put("url", doc.getUrl());
+        result.put("title", doc.getTitle());
+        result.put("rank", rank);
+        result.put("score", score);
+        
+        // Extract and clean the description from content
+        String description = getDescriptionFromContent(doc.getContent(), searchTerms);
+        
+        // Ensure we have a description - use alternative sources if needed
+        if (description == null || description.isEmpty() || description.equals("")) {
+            // Fallback to first part of content
+            if (doc.getContent() != null && !doc.getContent().isEmpty()) {
+                String plainContent = doc.getContent().replaceAll("<[^>]+>", " ").replaceAll("\\s+", " ").trim();
+                description = plainContent.substring(0, Math.min(plainContent.length(), 150)) + "...";
+            }
+            // Last resort
+            else {
+                description = "Content preview unavailable";
+            }
+        }
+        
+        // Use the correct field name for the frontend - "description" vs "snippet"
+        result.put("description", description);
+        result.put("snippet", description); // Add both for compatibility
+        
+        return result;
+    }
+    
+    /**
+     * Extract a relevant description snippet from the content
+     */
+    private String getDescriptionFromContent(String content, String[] searchTerms) {
+        if (content == null || content.isEmpty()) {
+            return "";
+        }
+        
+        try {
+            // Limit the content size to avoid memory issues
+            final int MAX_CONTENT_LENGTH = 100000; // Limit to 100K characters
+            if (content.length() > MAX_CONTENT_LENGTH) {
+                content = content.substring(0, MAX_CONTENT_LENGTH);
+            }
+            
+            // Clean content of HTML tags
+            String cleanContent = content.replaceAll("<[^>]+>", " ").replaceAll("\\s+", " ").trim();
+            
+            if (cleanContent.isEmpty()) {
+                return "";
+            }
+            
+            // Extract all search terms (including those inside quotes)
+            List<String> allTerms = new ArrayList<>();
+            for (String term : searchTerms) {
+                if (term == null) continue;
+                
+                // Handle quoted terms
+                if (term.startsWith("\"") && term.endsWith("\"")) {
+                    String innerTerm = term.substring(1, term.length() - 1);
+                    if (!innerTerm.isEmpty()) {
+                        allTerms.add(innerTerm);
+                    }
+                } else {
+                    allTerms.add(term);
+                }
+            }
+            
+            // Truncate if too long
+            if (cleanContent.length() > 300) {
+                // Try to find context around the first search term
+                int firstMatchPos = -1;
+                String bestTerm = null;
+                
+                // First try exact matches
+                for (String term : allTerms) {
+                    if (term.length() <= 1) continue;
+                    
+                    String lowerContent = cleanContent.toLowerCase();
+                    String lowerTerm = term.toLowerCase();
+                    int pos = lowerContent.indexOf(lowerTerm);
+                    
+                    if (pos >= 0) {
+                        if (firstMatchPos == -1 || pos < firstMatchPos) {
+                            firstMatchPos = pos;
+                            bestTerm = term;
+                        }
+                    }
+                }
+                
+                // If no exact matches, try partial word matches
+                if (firstMatchPos == -1) {
+                    for (String term : allTerms) {
+                        if (term.length() <= 2) continue; // Skip very short terms for partial matching
+                        
+                        // For each term, check if any word in the content contains it
+                        String[] words = cleanContent.toLowerCase().split("\\s+");
+                        String lowerTerm = term.toLowerCase();
+                        
+                        for (int i = 0; i < words.length; i++) {
+                            if (words[i].contains(lowerTerm)) {
+                                // Calculate position in original content
+                                int wordStartPos = -1;
+                                int wordCount = 0;
+                                for (int j = 0; j < cleanContent.length(); j++) {
+                                    if (j > 0 && Character.isWhitespace(cleanContent.charAt(j-1)) && 
+                                        !Character.isWhitespace(cleanContent.charAt(j))) {
+                                        wordCount++;
+                                    }
+                                    if (wordCount == i) {
+                                        wordStartPos = j;
+                                        break;
+                                    }
+                                }
+                                
+                                if (wordStartPos >= 0 && (firstMatchPos == -1 || wordStartPos < firstMatchPos)) {
+                                    firstMatchPos = wordStartPos;
+                                    bestTerm = words[i];
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                // Extract context around the match
+                if (firstMatchPos != -1 && bestTerm != null) {
+                    int startPos = Math.max(0, firstMatchPos - 100);
+                    int endPos = Math.min(cleanContent.length(), firstMatchPos + bestTerm.length() + 150);
+                    
+                    // Adjust to avoid cutting words
+                    while (startPos > 0 && startPos < cleanContent.length() && 
+                          cleanContent.charAt(startPos) != ' ' && cleanContent.charAt(startPos) != '.') {
+                        startPos--;
+                    }
+                    
+                    while (endPos < cleanContent.length() - 1 && 
+                          cleanContent.charAt(endPos) != ' ' && cleanContent.charAt(endPos) != '.') {
+                        endPos++;
+                        // Safety check to avoid running too far
+                        if (endPos - firstMatchPos > 200) {
+                            break;
+                        }
+                    }
+                    
+                    String snippet = cleanContent.substring(startPos, endPos).trim();
+                    
+                    // Add ellipsis if we're not at the beginning/end
+                    if (startPos > 0) {
+                        snippet = "..." + snippet;
+                    }
+                    if (endPos < cleanContent.length() - 1) {
+                        snippet = snippet + "...";
+                    }
+                    
+                    return snippet;
+                } else {
+                    // No match found, return beginning of content
+                    return cleanContent.substring(0, Math.min(250, cleanContent.length())) + "...";
+                }
+            } else {
+                return cleanContent;
+            }
+        } catch (OutOfMemoryError e) {
+            // Catch and handle memory errors
+            return "Content too large to display preview";
+        } catch (Exception e) {
+            // Catch all other errors
+            return "Error generating content preview";
+        }
     }
     
     /**
@@ -130,11 +355,20 @@ public class RankerService {
         // Create a map to store document terms for similarity calculation
         Map<Integer, Set<String>> documentTerms = new HashMap<>();
         
+        // Create a map to track domain frequencies for increased domain diversity
+        Map<String, Integer> domainFrequency = new HashMap<>();
+        
         // Load document term data for top results
         for (RankedResult result : topResults) {
-            Optional<Document> docOpt = documentRepository.findById((long)result.getDocumentId());
+            Optional<Document> docOpt = documentsRepository.findById((long)result.getDocumentId());
             if (docOpt.isPresent()) {
                 Document doc = docOpt.get();
+                
+                // Track domain frequencies
+                if (doc.getUrl() != null) {
+                    String domain = extractDomain(doc.getUrl().toLowerCase());
+                    domainFrequency.put(domain, domainFrequency.getOrDefault(domain, 0) + 1);
+                }
                 
                 // Extract significant terms from title and content
                 Set<String> terms = new HashSet<>();
@@ -167,6 +401,11 @@ public class RankerService {
                     }
                 }
                 
+                // Add search terms to the term set to prioritize them in similarity calculation
+                for (String term : searchTerms) {
+                    terms.add(term.toLowerCase());
+                }
+                
                 documentTerms.put(result.getDocumentId(), terms);
             }
         }
@@ -177,8 +416,23 @@ public class RankerService {
         
         // Always keep the top result
         if (!candidates.isEmpty()) {
-            rerankedResults.add(candidates.remove(0));
+            RankedResult topResult = candidates.remove(0);
+            rerankedResults.add(topResult);
+            
+            // Update domain frequency
+            Optional<Document> docOpt = documentsRepository.findById((long)topResult.getDocumentId());
+            if (docOpt.isPresent() && docOpt.get().getUrl() != null) {
+                String domain = extractDomain(docOpt.get().getUrl().toLowerCase());
+                domainFrequency.put(domain, domainFrequency.getOrDefault(domain, 0) + 1);
+            }
         }
+        
+        // Define domain diversity targets
+        Set<String> programmingDomains = new HashSet<>(Arrays.asList(
+            "github.com", "stackoverflow.com", "developer.mozilla.org", "w3schools.com",
+            "freecodecamp.org", "codecademy.com", "geeksforgeeks.org", "dev.to",
+            "replit.com", "codesandbox.io", "python.org", "reactjs.org"
+        ));
         
         // Greedy selection for diversity
         while (!candidates.isEmpty() && rerankedResults.size() < k) {
@@ -225,20 +479,34 @@ public class RankerService {
                     diversityFactor = 0.9; // Even stronger penalty for near-duplicates
                 }
                 
-                // Additional penalty for documents with similar URL patterns
-                Optional<Document> candidateDoc = documentRepository.findById((long)candidate.getDocumentId());
+                // Apply domain diversity penalties
+                double domainPenalty = 0.0;
+                
+                Optional<Document> candidateDoc = documentsRepository.findById((long)candidate.getDocumentId());
                 if (candidateDoc.isPresent() && candidateDoc.get().getUrl() != null) {
                     String candidateUrl = candidateDoc.get().getUrl().toLowerCase();
+                    String candidateDomain = extractDomain(candidateUrl);
                     
+                    // Check domain frequency - penalize domains that appear too often
+                    int frequency = domainFrequency.getOrDefault(candidateDomain, 0);
+                    if (frequency > 0) {
+                        // Progressive penalty based on frequency
+                        domainPenalty = Math.min(0.8, frequency * 0.15);
+                    }
+                    
+                    // Reduce domain penalty for important programming domains
+                    if (programmingDomains.contains(candidateDomain)) {
+                        domainPenalty *= 0.7; // 30% reduction in penalty for programming domains
+                    }
+                    
+                    // Additional penalty for documents with similar URL patterns
                     for (RankedResult selected : rerankedResults) {
-                        Optional<Document> selectedDoc = documentRepository.findById((long)selected.getDocumentId());
+                        Optional<Document> selectedDoc = documentsRepository.findById((long)selected.getDocumentId());
                         if (selectedDoc.isPresent() && selectedDoc.get().getUrl() != null) {
                             String selectedUrl = selectedDoc.get().getUrl().toLowerCase();
-                            
-                            // Check if URLs are from the same domain
-                            String candidateDomain = extractDomain(candidateUrl);
                             String selectedDomain = extractDomain(selectedUrl);
                             
+                            // Check if URLs are from the same domain
                             if (candidateDomain.equals(selectedDomain)) {
                                 // Check if URLs are very similar (same path structure)
                                 String candidatePath = candidateUrl.replace(candidateDomain, "");
@@ -247,14 +515,39 @@ public class RankerService {
                                 double urlPathSimilarity = calculatePathSimilarity(candidatePath, selectedPath);
                                 if (urlPathSimilarity > 0.7) {
                                     // Strong penalty for very similar URLs from same domain
-                                    diversityFactor = Math.min(0.95, diversityFactor + 0.15);
+                                    domainPenalty = Math.min(0.95, domainPenalty + 0.25);
                                 }
                             }
                         }
                     }
                 }
                 
-                double combinedScore = candidate.getScore() * (1 - diversityFactor * combinedSimilarity);
+                // Calculate final score with both content diversity and domain diversity
+                double combinedScore = candidate.getScore() * (1 - diversityFactor * combinedSimilarity) * (1 - domainPenalty);
+                
+                // Give slight bonus to programming-focused results for programming queries
+                boolean isProgrammingQuery = false;
+                for (String term : searchTerms) {
+                    if (term.toLowerCase().contains("code") || 
+                        term.toLowerCase().contains("programming") || 
+                        term.toLowerCase().contains("python") || 
+                        term.toLowerCase().contains("javascript") ||
+                        term.toLowerCase().contains("java") ||
+                        term.toLowerCase().contains("react") ||
+                        term.toLowerCase().contains("html") ||
+                        term.toLowerCase().contains("ai") ||
+                        term.toLowerCase().contains("css")) {
+                        isProgrammingQuery = true;
+                        break;
+                    }
+                }
+                
+                if (isProgrammingQuery && candidateDoc.isPresent() && candidateDoc.get().getUrl() != null) {
+                    String candidateDomain = extractDomain(candidateDoc.get().getUrl().toLowerCase());
+                    if (programmingDomains.contains(candidateDomain)) {
+                        combinedScore *= 1.15; // 15% bonus for programming sites on programming queries
+                    }
+                }
                 
                 if (combinedScore > bestScore) {
                     bestScore = combinedScore;
@@ -262,15 +555,22 @@ public class RankerService {
                 }
             }
             
-            if (bestCandidateIdx >= 0) {
-                rerankedResults.add(candidates.remove(bestCandidateIdx));
+            if (bestCandidateIdx != -1) {
+                RankedResult selected = candidates.remove(bestCandidateIdx);
+                rerankedResults.add(selected);
+                
+                // Update domain frequency
+                Optional<Document> docOpt = documentsRepository.findById((long)selected.getDocumentId());
+                if (docOpt.isPresent() && docOpt.get().getUrl() != null) {
+                    String domain = extractDomain(docOpt.get().getUrl().toLowerCase());
+                    domainFrequency.put(domain, domainFrequency.getOrDefault(domain, 0) + 1);
+                }
             } else {
-                // Fallback if no good candidate found
-                rerankedResults.add(candidates.remove(0));
+                break;
             }
         }
         
-        // Combine reranked results with remaining results
+        // Add remaining results in their original order
         rerankedResults.addAll(remainingResults);
         
         return rerankedResults;
@@ -351,85 +651,6 @@ public class RankerService {
         }
         
         return (double) matchingSegments / maxSegments;
-    }
-    
-    /**
-     * Converts a RankedResult to a map with document details
-     */
-    private Map<String, Object> convertToResultMap(RankedResult rankedResult, List<String> stemmedWords) {
-        Optional<Document> optionalDoc = documentRepository.findById((long)rankedResult.getDocumentId());
-        
-        if (!optionalDoc.isPresent()) {
-            return null;
-        }
-        
-        Document doc = optionalDoc.get();
-        Map<String, Object> result = new HashMap<>();
-        
-        result.put("id", doc.getId());
-        result.put("url", doc.getUrl());
-        result.put("title", doc.getTitle() != null ? doc.getTitle() : "No title");
-        result.put("score", rankedResult.getScore());
-        
-        // Generate more descriptive snippet from content
-        result.put("snippet", generateHighlightedSnippet(doc.getContent(), stemmedWords));
-        
-        return result;
-    }
-    
-    /**
-     * Generates a snippet from HTML content with query term highlighting
-     */
-    private String generateHighlightedSnippet(String htmlContent, List<String> queryTerms) {
-        if (htmlContent == null || htmlContent.isEmpty()) {
-            return "No content available";
-        }
-        
-        try {
-            // Parse HTML and extract text
-            String text = Jsoup.parse(htmlContent).text();
-            
-            // Look for a paragraph containing the query terms
-            String[] paragraphs = text.split("\\. ");
-            String bestParagraph = null;
-            int maxTerms = 0;
-            
-            for (String paragraph : paragraphs) {
-                if (paragraph.length() < 20) continue; // Skip very short paragraphs
-                
-                String lowerParagraph = paragraph.toLowerCase();
-                int termCount = 0;
-                
-                for (String term : queryTerms) {
-                    if (lowerParagraph.contains(term.toLowerCase())) {
-                        termCount++;
-                    }
-                }
-                
-                if (termCount > maxTerms) {
-                    maxTerms = termCount;
-                    bestParagraph = paragraph;
-                }
-            }
-            
-            // If no paragraph contains query terms, use the beginning
-            if (bestParagraph == null) {
-                if (text.length() > 200) {
-                    return text.substring(0, 197) + "...";
-                } else {
-                    return text;
-                }
-            }
-            
-            // Truncate if necessary
-            if (bestParagraph.length() > 200) {
-                return bestParagraph.substring(0, 197) + "...";
-            } else {
-                return bestParagraph;
-            }
-        } catch (Exception e) {
-            return "Content preview not available";
-        }
     }
     
     /**

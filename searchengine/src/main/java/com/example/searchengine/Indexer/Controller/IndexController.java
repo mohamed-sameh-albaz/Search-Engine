@@ -18,8 +18,12 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import java.util.HashMap;
 import org.springframework.data.domain.Page;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.CrossOrigin;
 
 @RestController
+@RequestMapping("/api/indexer")
+@CrossOrigin("*")
 public class IndexController {
 
     @Autowired
@@ -167,6 +171,52 @@ public class IndexController {
                 .collect(java.util.stream.Collectors.toList()));
                 
         return status;
+    }
+
+    /**
+     * Endpoint to trigger the computation of search metrics (IDF, TF-IDF) for faster search
+     * This should be called after indexing a significant number of new documents
+     */
+    @PostMapping("/compute-metrics")
+    public ResponseEntity<Map<String, Object>> computeMetrics() {
+        Map<String, Object> response = new HashMap<>();
+        
+        try {
+            // Start async metrics computation
+            indexService.computeAndStoreMetrics();
+            response.put("success", true);
+            response.put("message", "Metrics computation started successfully. This is an asynchronous operation and may take some time to complete.");
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            response.put("success", false);
+            response.put("message", "Failed to start metrics computation: " + e.getMessage());
+            return ResponseEntity.internalServerError().body(response);
+        }
+    }
+    
+    /**
+     * Endpoint to get indexing statistics and information
+     */
+    @GetMapping("/stats")
+    public ResponseEntity<Map<String, Object>> getIndexStats() {
+        Map<String, Object> response = new HashMap<>();
+        
+        try {
+            // Get document count
+            long documentCount = indexService.getDocumentCnt().size();
+            response.put("documentCount", documentCount);
+            
+            // Get word count
+            long wordCount = indexService.getInvertedIndex().size();
+            response.put("wordCount", wordCount);
+            
+            response.put("success", true);
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            response.put("success", false);
+            response.put("message", "Failed to get index stats: " + e.getMessage());
+            return ResponseEntity.internalServerError().body(response);
+        }
     }
 
 }

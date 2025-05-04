@@ -95,14 +95,15 @@ public class QueryService {
                 return result;
             }
             
-            // Simple query processing (existing code)
+            // Simple query processing
             boolean isPhraseQuery = false;
             
-            // If the entire query is within quotes
-            if (query.startsWith("\"") && query.endsWith("\"")) {
+            // Handle exact phrase queries (the entire query is in quotes)
+            if (query.startsWith("\"") && query.endsWith("\"") && query.length() > 2) {
                 query = query.substring(1, query.length() - 1);
                 isPhraseQuery = true;
                 result.setPhraseQuery(true);
+                logger.info("Processing as exact phrase query: '{}'", query);
             }
             
             // Extract phrases (text between quotes) if not already a phrase query
@@ -114,10 +115,14 @@ public class QueryService {
                     String phrase = matcher.group(1).trim();
                     if (!phrase.isEmpty()) {
                         phrases.add(phrase);
+                        // Also add single-word phrases as individual words for better matching
+                        if (!phrase.contains(" ")) {
+                            processRegularWords(phrase, stemmedWords, matchingDocuments);
+                        }
                     }
                 }
                 
-                // Process non-phrase parts
+                // Process non-phrase parts (text outside quotes)
                 String nonPhraseParts = query.replaceAll("\"[^\"]*\"", " ").trim();
                 processRegularWords(nonPhraseParts, stemmedWords, matchingDocuments);
             } else {
@@ -128,6 +133,9 @@ public class QueryService {
             // Process phrases and get matching documents
             for (String phrase : phrases) {
                 processPhraseSearch(phrase, matchingDocuments);
+                // Log the results for this phrase
+                List<Long> phraseDocs = matchingDocuments.getOrDefault(phrase, new ArrayList<>());
+                logger.info("Found {} documents matching phrase: '{}'", phraseDocs.size(), phrase);
             }
             
             result.setPhrases(phrases);
@@ -153,7 +161,7 @@ public class QueryService {
             
             result.setResults(searchResults);
             
-            logger.info("Query processing completed with {} results", result.getResults().size());
+            logger.info("Query processing completed with {} results", searchResults.size());
             
         } catch (Exception e) {
             logger.error("Error processing query: {}", query, e);
@@ -428,8 +436,62 @@ public class QueryService {
     }
     
     private void processPhraseSearch(String phrase, Map<String, List<Long>> matchingDocuments) {
+        logger.info("Processing phrase search for: '{}'", phrase);
+        
         // Process a phrase search
         List<String> words = Arrays.asList(phrase.toLowerCase().split("\\s+"));
+        
+        // Handling for single-word phrases (exact matches)
+        boolean isSingleWordPhrase = words.size() == 1 && !words.get(0).isEmpty();
+        if (isSingleWordPhrase) {
+            String word = words.get(0);
+            // For single-word phrases in quotes, we want exact matches
+            Optional<Word> wordEntity = wordRepository.findByWord(word);
+            if (wordEntity.isPresent()) {
+                try {
+                    // Try both tables - first check if word_position table exists
+                    boolean hasWordPositions = false;
+                    try {
+                        Integer count = jdbcTemplate.queryForObject(
+                            "SELECT COUNT(*) FROM word_position WHERE word_id = ? LIMIT 1",
+                            Integer.class,
+                            wordEntity.get().getId()
+                        );
+                        hasWordPositions = count != null && count > 0;
+                    } catch (Exception e) {
+                        logger.warn("Error checking word_position table: {}", e.getMessage());
+                    }
+                    
+                    List<Long> docIds;
+                    if (hasWordPositions) {
+                        docIds = jdbcTemplate.query(
+                            "SELECT DISTINCT doc_id FROM word_position WHERE word_id = ? LIMIT 5000",
+                            (rs, rowNum) -> rs.getLong("doc_id"),
+                            wordEntity.get().getId()
+                        );
+                    } else {
+                        // Fall back to inverted_index
+                        docIds = jdbcTemplate.query(
+                            "SELECT doc_id FROM inverted_index WHERE word_id = ? LIMIT 5000",
+                            (rs, rowNum) -> rs.getLong("doc_id"),
+                            wordEntity.get().getId()
+                        );
+                    }
+                    
+                    // Add to matching documents with the exact word as key
+                    matchingDocuments.put("\"" + word + "\"", docIds);
+                    logger.info("Found {} documents with exact match for word '{}'", docIds.size(), word);
+                } catch (Exception e) {
+                    logger.error("Error fetching single word matches: {}", e.getMessage());
+                    matchingDocuments.put("\"" + word + "\"", new ArrayList<>());
+                }
+                return;
+            } else {
+                // No exact matches found
+                matchingDocuments.put("\"" + word + "\"", new ArrayList<>());
+                return;
+            }
+        }
         
         // Filter out stop words and stem each word
         List<String> filteredAndStemmed = words.stream()
@@ -445,71 +507,114 @@ public class QueryService {
         // Log the phrase being searched
         logger.info("Processing phrase search for: '{}', stemmed as: {}", phrase, filteredAndStemmed);
         
-        // Get documents containing all words in the phrase using SQL for efficiency
-        Set<Long> docsWithAllWords = null;
-        
         try {
+            // Get word IDs for all words in the phrase
+            List<Long> wordIds = new ArrayList<>();
+            Map<Long, String> wordIdToStemmed = new HashMap<>();
+            
             for (String stemmed : filteredAndStemmed) {
                 Optional<Word> wordEntity = wordRepository.findByWord(stemmed);
-                if (wordEntity.isPresent()) {
-                    // Use direct SQL query with higher limit (5000 instead of 1000)
-                    List<Long> docIds = jdbcTemplate.query(
-                        "SELECT doc_id FROM inverted_index WHERE word_id = ? LIMIT 5000",
-                        (rs, rowNum) -> rs.getLong("doc_id"),
-                        wordEntity.get().getId()
-                    );
-                    
-                    if (docsWithAllWords == null) {
-                        docsWithAllWords = new HashSet<>(docIds);
-                    } else {
-                        docsWithAllWords.retainAll(docIds);
-                        
-                        // Early termination if no matches found
-                        if (docsWithAllWords.isEmpty()) {
-                            break;
-                        }
-                    }
-                } else {
-                    // If any word is not found, there are no matching documents
-                    docsWithAllWords = new HashSet<>();
-                    break;
+                if (!wordEntity.isPresent()) {
+                    // If any word doesn't exist, return empty results
+                    matchingDocuments.put(phrase, new ArrayList<>());
+                    return;
                 }
+                Long wordId = wordEntity.get().getId();
+                wordIds.add(wordId);
+                wordIdToStemmed.put(wordId, stemmed);
             }
-        } catch (Exception e) {
-            logger.error("Error in phrase search for '{}': {}", phrase, e.getMessage());
-            docsWithAllWords = new HashSet<>();
-        }
-        
-        if (docsWithAllWords == null || docsWithAllWords.isEmpty()) {
-            logger.info("No documents found containing all words in phrase: '{}'", phrase);
-            matchingDocuments.put(phrase, new ArrayList<>());
-            return;
-        }
-        
-        logger.info("Found {} documents containing all words in phrase: '{}'", docsWithAllWords.size(), phrase);
-        
-        // Process documents in batches to check if the words appear in sequence
-        List<Long> matchingDocs = new ArrayList<>();
-        List<Long> docIdsList = new ArrayList<>(docsWithAllWords);
-        int batchSize = 20;
-        
-        for (int i = 0; i < docIdsList.size(); i += batchSize) {
-            int endIndex = Math.min(i + batchSize, docIdsList.size());
-            List<Long> batchIds = docIdsList.subList(i, endIndex);
             
-            for (Long docId : batchIds) {
-                try {
+            if (wordIds.isEmpty()) {
+                matchingDocuments.put(phrase, new ArrayList<>());
+                return;
+            }
+            
+            // Check if word_position table exists and has data
+            boolean useWordPositions = false;
+            try {
+                Integer count = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM word_position WHERE word_id = ? LIMIT 1",
+                    Integer.class,
+                    wordIds.get(0)
+                );
+                useWordPositions = count != null && count > 0;
+            } catch (Exception e) {
+                logger.warn("Error checking word_position table: {}, falling back to content-based matching", e.getMessage());
+            }
+            
+            // Get documents containing the first word
+            List<Long> candidateDocIds;
+            if (useWordPositions) {
+                candidateDocIds = jdbcTemplate.query(
+                    "SELECT DISTINCT doc_id FROM word_position WHERE word_id = ? LIMIT 5000",
+                    (rs, rowNum) -> rs.getLong("doc_id"),
+                    wordIds.get(0)
+                );
+            } else {
+                // Fall back to inverted_index
+                candidateDocIds = jdbcTemplate.query(
+                    "SELECT doc_id FROM inverted_index WHERE word_id = ? LIMIT 5000",
+                    (rs, rowNum) -> rs.getLong("doc_id"),
+                    wordIds.get(0)
+                );
+            }
+            
+            if (candidateDocIds.isEmpty()) {
+                matchingDocuments.put(phrase, new ArrayList<>());
+                return;
+            }
+            
+            // Get documents containing all words in the phrase first
+            if (filteredAndStemmed.size() > 1) {
+                Set<Long> docsWithAllWords = new HashSet<>(candidateDocIds);
+                for (int i = 1; i < wordIds.size(); i++) {
+                    List<Long> docsWithWord;
+                    if (useWordPositions) {
+                        docsWithWord = jdbcTemplate.query(
+                            "SELECT DISTINCT doc_id FROM word_position WHERE word_id = ? LIMIT 5000",
+                            (rs, rowNum) -> rs.getLong("doc_id"),
+                            wordIds.get(i)
+                        );
+                    } else {
+                        // Fall back to inverted_index
+                        docsWithWord = jdbcTemplate.query(
+                            "SELECT doc_id FROM inverted_index WHERE word_id = ? LIMIT 5000",
+                            (rs, rowNum) -> rs.getLong("doc_id"),
+                            wordIds.get(i)
+                        );
+                    }
+                    docsWithAllWords.retainAll(docsWithWord);
+                    
+                    if (docsWithAllWords.isEmpty()) {
+                        matchingDocuments.put(phrase, new ArrayList<>());
+                        return;
+                    }
+                }
+                candidateDocIds = new ArrayList<>(docsWithAllWords);
+            }
+            
+            // Process documents in batches to check for exact phrase matches
+            List<Long> matchingDocs = new ArrayList<>();
+            int batchSize = 20; // Process 20 documents at a time
+            
+            for (int i = 0; i < candidateDocIds.size(); i += batchSize) {
+                int endIndex = Math.min(i + batchSize, candidateDocIds.size());
+                List<Long> batchDocIds = candidateDocIds.subList(i, endIndex);
+                
+                for (Long docId : batchDocIds) {
                     if (checkPhraseMatch(docId, filteredAndStemmed)) {
                         matchingDocs.add(docId);
                     }
-                } catch (Exception e) {
-                    logger.error("Error checking phrase match for doc {}: {}", docId, e.getMessage());
                 }
             }
+            
+            logger.info("Found {} documents containing the exact phrase: '{}'", matchingDocs.size(), phrase);
+            matchingDocuments.put(phrase, matchingDocs);
+            
+        } catch (Exception e) {
+            logger.error("Error in phrase search for '{}': {}", phrase, e.getMessage());
+            matchingDocuments.put(phrase, new ArrayList<>());
         }
-        
-        logger.info("Final count: {} documents matching the exact phrase: '{}'", matchingDocs.size(), phrase);
-        matchingDocuments.put(phrase, matchingDocs);
     }
     
     private boolean checkPhraseMatch(Long docId, List<String> stemmedPhrase) {
@@ -517,17 +622,17 @@ public class QueryService {
             return false;
         }
         
-        // Get the document content to check for exact phrase match first
-        Optional<Document> docOpt = documentRepository.findById(docId);
-        if (docOpt.isPresent()) {
-            Document doc = docOpt.get();
-            if (doc.getContent() != null) {
-                try {
+        try {
+            // Try first with a direct content check which is faster
+            Optional<Document> docOpt = documentRepository.findById(docId);
+            if (docOpt.isPresent()) {
+                Document doc = docOpt.get();
+                if (doc.getContent() != null) {
                     // Parse HTML content
                     org.jsoup.nodes.Document parsedDoc = org.jsoup.Jsoup.parse(doc.getContent());
                     String text = parsedDoc.text().toLowerCase();
                     
-                    // Simple direct content check for the exact phrase
+                    // Check for the exact phrase in content
                     String searchPhrase = String.join(" ", stemmedPhrase).toLowerCase();
                     if (text.contains(searchPhrase)) {
                         logger.debug("Document {} contains exact phrase match for '{}'", docId, searchPhrase);
@@ -539,77 +644,106 @@ public class QueryService {
                         logger.debug("Document {} contains exact phrase match in title for '{}'", docId, searchPhrase);
                         return true;
                     }
-                } catch (Exception e) {
-                    logger.debug("Error checking content for phrase match in doc {}: {}", docId, e.getMessage());
-                    // Continue with position-based check if content check fails
                 }
             }
-        }
-        
-        // Get all occurrences of the first word in the document using direct SQL
-        Word firstWordEntity = wordRepository.findByWord(stemmedPhrase.get(0)).orElse(null);
-        if (firstWordEntity == null) {
-            return false;
-        }
-        
-        try {
-            // Get first word positions efficiently with a direct query
-            List<Map<String, Object>> firstWordPositions = jdbcTemplate.queryForList(
-                "SELECT paragraph_index, word_index FROM word_document_tags " +
-                "WHERE word_id = ? AND doc_id = ? LIMIT 100", 
-                firstWordEntity.getId(), docId
-            );
             
-            if (firstWordPositions.isEmpty()) {
-                return false;
-            }
+            // If content check doesn't find it, try the word position check
             
             // Cache word entities to avoid repeated lookups
             Map<String, Long> wordIdCache = new HashMap<>();
-            wordIdCache.put(stemmedPhrase.get(0), firstWordEntity.getId());
             
-            // Get the remaining word IDs upfront
-            for (int i = 1; i < stemmedPhrase.size(); i++) {
-                Word nextWordEntity = wordRepository.findByWord(stemmedPhrase.get(i)).orElse(null);
-                if (nextWordEntity == null) {
+            // Get all word IDs up front
+            for (String stemmed : stemmedPhrase) {
+                Word wordEntity = wordRepository.findByWord(stemmed).orElse(null);
+                if (wordEntity == null) {
                     return false;
                 }
-                wordIdCache.put(stemmedPhrase.get(i), nextWordEntity.getId());
+                wordIdCache.put(stemmed, wordEntity.getId());
             }
             
-            // Check each position of the first word
-            for (Map<String, Object> firstPos : firstWordPositions) {
-                Integer paragraphIdx = (Integer) firstPos.get("paragraph_index");
-                Integer wordIdx = (Integer) firstPos.get("word_index");
+            // Get all first word positions to start checking from
+            Long firstWordId = wordIdCache.get(stemmedPhrase.get(0));
+            
+            // First check if word_position table exists and has records
+            boolean hasWordPositions = false;
+            try {
+                Integer positionCount = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM word_position WHERE word_id = ? AND doc_id = ?",
+                    Integer.class,
+                    firstWordId, docId
+                );
+                hasWordPositions = positionCount != null && positionCount > 0;
+            } catch (Exception e) {
+                logger.warn("Error checking word_position table: {}. Will fall back to paragraph-based matching.", e.getMessage());
+            }
+            
+            if (hasWordPositions) {
+                // Use word_position table for exact position matching
+                String positionsQuery = 
+                    "SELECT position FROM word_position " +
+                    "WHERE word_id = ? AND doc_id = ? " +
+                    "ORDER BY position";
                 
-                if (paragraphIdx == null || wordIdx == null) {
-                    continue;
+                List<Integer> firstWordPositions = jdbcTemplate.query(
+                    positionsQuery,
+                    (rs, rowNum) -> rs.getInt("position"),
+                    firstWordId, docId
+                );
+                
+                if (firstWordPositions.isEmpty()) {
+                    return false;
                 }
                 
-                boolean allMatch = true;
-                
-                // Check if all words in the phrase are consecutive
-                for (int i = 1; i < stemmedPhrase.size(); i++) {
-                    Long nextWordId = wordIdCache.get(stemmedPhrase.get(i));
+                // For each position of the first word, check if we have a complete phrase match
+                for (Integer startPos : firstWordPositions) {
+                    boolean fullMatch = true;
                     
-                    // Check if the next word exists at the exact position
+                    // Check each subsequent word position
+                    for (int i = 1; i < stemmedPhrase.size(); i++) {
+                        Long nextWordId = wordIdCache.get(stemmedPhrase.get(i));
+                        int expectedPos = startPos + i;
+                        
+                        // Check if the next word exists at the expected position
+                        int count = jdbcTemplate.queryForObject(
+                            "SELECT COUNT(*) FROM word_position " +
+                            "WHERE word_id = ? AND doc_id = ? AND position = ?",
+                            Integer.class,
+                            nextWordId, docId, expectedPos
+                        );
+                        
+                        if (count == 0) {
+                            fullMatch = false;
+                            break;
+                        }
+                    }
+                    
+                    if (fullMatch) {
+                        logger.info("Found exact phrase match in document {} at position {}", docId, startPos);
+                        return true;
+                    }
+                }
+            } else {
+                // Use paragraph-based word matching as fallback
+                // This is less precise but works even if word_position table isn't populated
+                for (int i = 0; i < stemmedPhrase.size(); i++) {
+                    Long wordId = wordIdCache.get(stemmedPhrase.get(i));
+                    
+                    // Check if this word appears in the document at all
                     int count = jdbcTemplate.queryForObject(
-                        "SELECT COUNT(*) FROM word_document_tags " +
-                        "WHERE word_id = ? AND doc_id = ? AND paragraph_index = ? AND word_index = ?", 
+                        "SELECT COUNT(*) FROM inverted_index " +
+                        "WHERE word_id = ? AND doc_id = ?",
                         Integer.class,
-                        nextWordId, docId, paragraphIdx, wordIdx + i
+                        wordId, docId
                     );
                     
                     if (count == 0) {
-                        allMatch = false;
-                        break;
+                        return false;
                     }
                 }
                 
-                if (allMatch) {
-                    logger.debug("Document {} contains consecutive phrase match for position-based check", docId);
-                    return true;
-                }
+                // If all words exist in the document and we already checked content
+                // for exact phrase match (which failed), return false
+                return false;
             }
             
             return false;
@@ -704,6 +838,8 @@ public class QueryService {
     private List<Map<String, Object>> fetchPhraseSearchResults(String phrase, Map<String, List<Long>> matchingDocuments) {
         List<Long> matchingDocs = matchingDocuments.getOrDefault(phrase, new ArrayList<>());
         
+        logger.info("Fetching details for {} documents matching phrase '{}'", matchingDocs.size(), phrase);
+        
         // For phrase search, we split the phrase into words for snippet generation
         List<String> phraseWords = Arrays.asList(phrase.toLowerCase().split("\\s+"));
         List<String> filteredAndStemmed = phraseWords.stream()
@@ -711,6 +847,18 @@ public class QueryService {
             .map(this::stemWord)
             .filter(stemmed -> !stemmed.isEmpty())
             .collect(Collectors.toList());
+        
+        // If it's a single word in quotes, also fetch as a direct word match
+        if (filteredAndStemmed.size() == 1) {
+            String exactWord = "\"" + filteredAndStemmed.get(0) + "\"";
+            List<Long> exactMatches = matchingDocuments.getOrDefault(exactWord, new ArrayList<>());
+            
+            // Combine the exact matches with any phrase matches
+            Set<Long> combinedDocs = new HashSet<>(matchingDocs);
+            combinedDocs.addAll(exactMatches);
+            
+            return fetchDocumentDetails(filteredAndStemmed, new ArrayList<>(combinedDocs));
+        }
         
         return fetchDocumentDetails(filteredAndStemmed, matchingDocs);
     }
@@ -771,6 +919,9 @@ public class QueryService {
                                 // Generate a snippet highlighting the query terms
                                 String snippet = generateSnippet((String)docData.get("content"), stemmedWords);
                                 result.put("snippet", snippet);
+                                
+                                // Generate a clean, meaningful description for search results
+                                result.put("description", generateSearchResultDescription(docData));
                                 
                                 batchResults.add(result);
                             }
@@ -1509,5 +1660,167 @@ public class QueryService {
         return suggestions.stream()
                 .limit(5)
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * Generate a clean, meaningful description for search results
+     * @param docData Map containing document data including content
+     * @return A formatted description snippet
+     */
+    private String generateSearchResultDescription(Map<String, Object> docData) {
+        try {
+            // Clean HTML content first
+            String content = (String) docData.get("content");
+            if (content == null || content.isEmpty()) {
+                return "Visit this page to learn more...";
+            }
+            
+            // Use Jsoup to clean and extract text
+            org.jsoup.nodes.Document jsoupDoc = org.jsoup.Jsoup.parse(content);
+            
+            // Remove script and style elements
+            jsoupDoc.select("script, style, meta, link, iframe, noscript").remove();
+            
+            // Get text content from important elements
+            String description = "";
+            
+            // Try to get meta description first
+            org.jsoup.nodes.Element metaDesc = jsoupDoc.select("meta[name=description]").first();
+            if (metaDesc != null && !metaDesc.attr("content").trim().isEmpty()) {
+                description = metaDesc.attr("content").trim();
+            }
+            
+            // If no meta description, try to extract from content
+            if (description.isEmpty()) {
+                // First try to get content from p tags
+                StringBuilder contentBuilder = new StringBuilder();
+                for (org.jsoup.nodes.Element p : jsoupDoc.select("p")) {
+                    String pText = p.text().trim();
+                    if (!pText.isEmpty() && pText.length() > 50) {
+                        contentBuilder.append(pText).append(" ");
+                        if (contentBuilder.length() > 200) break;
+                    }
+                }
+                
+                // If we couldn't get enough from p tags, use the main content
+                if (contentBuilder.length() < 100) {
+                    // Extract text from body, limited to first 300 chars
+                    String bodyText = jsoupDoc.body().text();
+                    if (bodyText.length() > 300) {
+                        description = bodyText.substring(0, 300) + "...";
+                    } else {
+                        description = bodyText;
+                    }
+                } else {
+                    description = contentBuilder.toString().trim();
+                    if (description.length() > 300) {
+                        description = description.substring(0, 300) + "...";
+                    }
+                }
+            }
+            
+            // Clean up any weird characters or formatting
+            description = description.replaceAll("\\s+", " ").trim();
+            
+            return description;
+        } catch (Exception e) {
+            // Fallback to a simple description if parsing fails
+            return "Visit this page to learn more...";
+        }
+    }
+
+    /**
+     * Format search results to improve readability of descriptions
+     * @param results The raw search results
+     * @return Formatted results with cleaned descriptions
+     */
+    public List<Map<String, Object>> formatSearchResults(List<Map<String, Object>> results) {
+        return results.stream()
+            .map(this::formatSearchResult)
+            .collect(Collectors.toList());
+    }
+
+    /**
+     * Format a single search result for better display
+     * @param result The raw search result
+     * @return Formatted result with cleaned description
+     */
+    private Map<String, Object> formatSearchResult(Map<String, Object> result) {
+        Map<String, Object> formatted = new HashMap<>(result);
+        
+        // Format the description/snippet to make it more readable
+        String description = (String) result.get("snippet");
+        if (description != null) {
+            // Remove any base64 or data URIs which can be long and useless
+            description = description.replaceAll("data:[^\\s]*;base64,[^\\s]*", "");
+            
+            // Remove any JS variable declarations
+            description = description.replaceAll("var\\s+[^=]+=\\s*[^;]*;", "");
+            
+            // Remove any CSS style blocks
+            description = description.replaceAll("\\{--[^}]*\\}", "");
+            
+            // Remove any JSON/object literals
+            description = description.replaceAll("\\{[\"'][^}]*\\}", "");
+            
+            // Clean up code formats
+            description = description.replaceAll("function\\s*\\([^)]*\\)\\s*\\{[^}]*\\}", "[CODE BLOCK]");
+            
+            // Truncate if too long
+            if (description.length() > 250) {
+                // Try to find a good breaking point
+                int breakPoint = description.lastIndexOf(". ", 250);
+                if (breakPoint > 150) {
+                    description = description.substring(0, breakPoint + 1);
+                } else {
+                    description = description.substring(0, 250) + "...";
+                }
+            }
+            
+            // Clean up whitespace
+            description = description.replaceAll("\\s+", " ").trim();
+            
+            // Update the snippet with the cleaned description
+            formatted.put("snippet", description);
+        }
+        
+        return formatted;
+    }
+
+    /**
+     * Search for documents matching the query and return paginated results
+     * @param query The search query
+     * @param page The page number (1-based)
+     * @param pageSize Number of results per page
+     * @return List of search results
+     */
+    public List<Map<String, Object>> search(String query, int page, int pageSize) {
+        QueryResult result = processQuery(query);
+        
+        List<Map<String, Object>> allResults = result.getResults();
+        if (allResults == null || allResults.isEmpty()) {
+            return new ArrayList<>();
+        }
+        
+        // Apply pagination
+        int fromIndex = (page - 1) * pageSize;
+        int toIndex = Math.min(fromIndex + pageSize, allResults.size());
+        
+        if (fromIndex >= allResults.size()) {
+            return new ArrayList<>();
+        }
+        
+        return formatSearchResults(allResults.subList(fromIndex, toIndex));
+    }
+    
+    /**
+     * Get the total number of results for a query
+     * @param query The search query
+     * @return Total number of matching documents
+     */
+    public int getTotalResultsCount(String query) {
+        QueryResult result = processQuery(query);
+        List<Map<String, Object>> results = result.getResults();
+        return results != null ? results.size() : 0;
     }
 } 

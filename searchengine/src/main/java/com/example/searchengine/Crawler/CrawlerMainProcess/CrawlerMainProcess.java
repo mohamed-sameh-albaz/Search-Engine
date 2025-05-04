@@ -515,66 +515,72 @@ public class CrawlerMainProcess {
     }
 
     public String normalizeURL(String url) {
-        if (url == null || url.isEmpty() || url.charAt(0) == '#' || url.length() == 1)
-            return null;
-
         try {
-            url = url.toLowerCase();
-            URL baseUrl = new URL(url);
-            String protocol = baseUrl.getProtocol();
-            String host = baseUrl.getHost();
-            String path = baseUrl.getPath();
-            String query = baseUrl.getQuery() != null ? baseUrl.getQuery() : "";
+            URL url_obj = URI.create(url).toURL();
+            // Check if the URL is valid and not already processed
+            String urlString = url_obj.toString();
+            if (url_obj == null || url_obj.getHost() == null) {
+                return null;
+            }
 
-            if (!query.isEmpty()) {
-                String[] queryParams = query.split("&");
-                Arrays.sort(queryParams);
-                StringBuilder sortedQuery = new StringBuilder();
-                for (int i = 0; i < queryParams.length; i++) {
-                    sortedQuery.append(queryParams[i]);
-                    if (i != queryParams.length - 1) {
-                        sortedQuery.append("&");
+            String protocol = url_obj.getProtocol().toLowerCase();
+            String token = url_obj.getHost().toLowerCase();
+            String portPart = (url_obj.getPort() == -1 || protocol.equals("https") || protocol.equals("http")) ? "" : ":" + url_obj.getPort();
+            String path = url_obj.getPath() == null ? "" : url_obj.getPath().toLowerCase();
+            String query = url_obj.getQuery() == null ? "" : url_obj.getQuery();
+            String fragment = url_obj.getRef() == null ? "" : "#" + url_obj.getRef();
+            // edit path
+            String editedpath = path;
+            editedpath = editedpath.replaceAll("%2e", ".");
+            editedpath = editedpath.replaceAll("%2f", "/");
+
+            editedpath = editedpath.replaceAll("/[^/]+/\\.\\./", "/");
+            editedpath = editedpath.replaceAll("/\\.", "");
+            editedpath = editedpath.replaceAll("/{2,}", "/");
+            if (!path.equals("/") && path.endsWith("/")) {
+                editedpath = editedpath.substring(0, editedpath.length() - 1);
+                editedpath = editedpath.replaceAll("/+$", "/");
+            }
+            urlString = urlString.replace(path, editedpath);
+            
+            // Replace host with normalized token and handle port
+            String hostPort = url_obj.getHost();
+            if (url_obj.getPort() != -1) {
+                hostPort += ":" + url_obj.getPort();
+            }
+            
+            String normalizedHostPort = token + portPart;
+            urlString = urlString.replace(hostPort, normalizedHostPort);
+            
+            // edit query
+            StringBuilder editedquery = new StringBuilder();
+            String[] params = query.split("&");
+            Arrays.sort(params);
+
+            for (String param : params) {
+                String[] toencode = param.split("=", 2);
+                if (toencode.length == 2) {
+                    try {
+                        String encoded = toencode[1];
+                        encoded = URLEncoder.encode(encoded, "UTF-8");
+                        System.out.println("encoded: " + encoded);
+                        param = param.replace(toencode[1], encoded);
+                    } catch (java.io.UnsupportedEncodingException e) {
+                        System.out.println("Encoding error: " + e.getMessage());
                     }
                 }
-                query = sortedQuery.toString();
+                editedquery.append(param).append("&");
             }
-
-            if (!host.startsWith("www.") && !host.equals("localhost")) {
-                host = "www." + host;
+            if (editedquery.length() > 0) {
+                editedquery.deleteCharAt(editedquery.length() - 1); // Remove the last '&'
             }
-
-            StringBuilder normalizedPath = new StringBuilder();
-            boolean lastWasSlash = false;
-            for (char c : path.toCharArray()) {
-                if (c == '/') {
-                    if (!lastWasSlash) {
-                        normalizedPath.append(c);
-                    }
-                    lastWasSlash = true;
-                } else {
-                    normalizedPath.append(c);
-                    lastWasSlash = false;
-                }
+            urlString = urlString.replace(query, editedquery.toString());
+            urlString = urlString.replace(fragment, "");
+            if (!urlString.isEmpty() && (urlString.endsWith("/") || urlString.endsWith("\\")))
+            {
+                urlString = urlString.substring(0, urlString.length() - 1);
             }
-            path = normalizedPath.toString();
-
-            for (int i = 0; i < path.length(); i++) {
-                if (path.charAt(i) == '%' && i + 2 < path.length()) {
-                try {
-                        int num = Integer.parseInt(path.substring(i + 1, i + 3), 16);
-                        path = path.substring(0, i) + (char) num + path.substring(i + 3);
-                    } catch (NumberFormatException e) {
-                        // Ignore invalid encoding
-                }
-            }
-            }
-
-            String normalizedUrl = protocol + "://" + host + path;
-            if (!query.isEmpty()) {
-                normalizedUrl += "?" + query;
-            }
-
-            return normalizedUrl;
+            return urlString;
         } catch (Exception e) {
             return null;
         }

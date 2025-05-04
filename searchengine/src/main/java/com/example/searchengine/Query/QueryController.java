@@ -12,6 +12,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.ArrayList;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.Comparator;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
@@ -189,151 +190,141 @@ public class QueryController {
         return ResponseEntity.ok(response);
     }
     
-    @GetMapping("/search")
+    /**
+     * Ensure the session cache doesn't exceed maximum size
+     */
+    private void ensureSessionCacheSize() {
+        if (searchSessionCache.size() > MAX_SESSION_SIZE) {
+            // Remove oldest entries if cache is too large
+            List<Map.Entry<String, SearchSession>> entries = new ArrayList<>(searchSessionCache.entrySet());
+            entries.sort(Comparator.comparingLong(e -> e.getValue().timestamp));
+            
+            int toRemove = searchSessionCache.size() - MAX_SESSION_SIZE;
+            for (int i = 0; i < toRemove; i++) {
+                if (i < entries.size()) {
+                    searchSessionCache.remove(entries.get(i).getKey());
+                }
+            }
+        }
+    }
+    
+    /**
+     * Execute a query and get the result
+     */
+    private QueryResult executeQuery(String query) {
+        return queryService.processQuery(query);
+    }
+    
+    @GetMapping("/query-search")
     public ResponseEntity<Map<String, Object>> search(
             @RequestParam String query,
-            @RequestParam(required = false) String sessionId,
             @RequestParam(required = false, defaultValue = "1") int page,
-            @RequestParam(required = false, defaultValue = "10") int size) {
+            @RequestParam(required = false, defaultValue = "10") int pageSize,
+            @RequestParam(required = false) String sessionId) {
         
         try {
-            // Get query result (from cache if available)
-            QueryResult queryResult = getQueryResult(query);
+            long startTime = System.currentTimeMillis();
             
-            // Results storage and session handling
-            String currentSessionId = sessionId;
-            List<Map<String, Object>> allResults;
+            // Use the cached results if available for the same session
+            String newSessionId = sessionId;
+            List<Map<String, Object>> allResults = null;
             
-            // Special handling for Middle East conflict queries to ensure consistent ranking
-            boolean isMiddleEastQuery = isMiddleEastConflictQuery(query.toLowerCase());
-            
-            // Check if this is an existing session and if the query matches the session's query
-            boolean isValidSession = false;
-            if (currentSessionId != null && searchSessionCache.containsKey(currentSessionId)) {
-                SearchSession existingSession = searchSessionCache.get(currentSessionId);
-                // Only reuse session if query is EXACTLY the same
-                isValidSession = existingSession.query.equals(query);
-                
-                if (!isValidSession) {
-                    // Query has changed - invalidate the old session
-                    logger.info("Query changed from '{}' to '{}', creating new session", 
-                              existingSession.query, query);
-                    currentSessionId = null;
+            if (sessionId != null && searchSessionCache.containsKey(sessionId)) {
+                SearchSession session = searchSessionCache.get(sessionId);
+                if (session.query.equals(query)) {
+                    allResults = session.results;
+                    logger.debug("Using cached results for session {}", sessionId);
                 }
             }
             
-            // Check if we need a new search
-            boolean needNewSearch = (currentSessionId == null || !isValidSession);
-            
-            if (needNewSearch) {
-                // New search - generate session ID and calculate all results
-                currentSessionId = UUID.randomUUID().toString();
+            // If no cached results, perform the search
+            if (allResults == null) {
+                // Create a new session ID
+                newSessionId = UUID.randomUUID().toString();
                 
-                if (queryResult.getOperator() != null) {
-                    // For complex queries, we already have the full results
-                    allResults = queryResult.getResults();
-                } else {
-                    // For regular searches, calculate all ranked results
-                    allResults = rankerService.rankResults(
-                        queryResult.getMatchingDocuments(), 
-                        queryResult.getStemmedWords(), 
-                        queryResult.getPhrases(),
-                        1,  // Start at page 1
-                        Integer.MAX_VALUE  // Get all results in one go
-                    );
-                    
-                    // Extra post-processing filter for critical queries to remove any irrelevant results
-                    if (isMiddleEastQuery) {
-                        // Remove results with very low scores (likely irrelevant)
-                        allResults = allResults.stream()
-                            .filter(result -> {
-                                double score = (double) result.get("score");
-                                return score > 0.05; // Filter out obviously irrelevant results
-                            })
-                            .collect(Collectors.toList());
-                    }
-                }
+                QueryResult result = executeQuery(query);
                 
-                // Store in session cache
-                searchSessionCache.put(currentSessionId, new SearchSession(query, allResults));
-                ensureCacheSize();
-                logger.info("Created new search session {} with {} results", currentSessionId, allResults.size());
-            } else {
-                // Existing valid session - retrieve cached results
-                SearchSession session = searchSessionCache.get(currentSessionId);
-                allResults = session.results;
-                logger.info("Using existing search session {} with {} results", currentSessionId, allResults.size());
+                // Store all results in a search session for consistent pagination
+                allResults = result.getResults();
+                
+                // Add to session cache
+                ensureSessionCacheSize();
+                searchSessionCache.put(newSessionId, new SearchSession(query, allResults));
             }
             
-            // Store total count
+            // Calculate pagination
             int totalResults = allResults.size();
+            int fromIndex = (page - 1) * pageSize;
+            int toIndex = Math.min(fromIndex + pageSize, totalResults);
             
-            // Apply pagination to the stored results
-            List<Map<String, Object>> finalResults;
-            int startIndex = (page - 1) * size;
-            int endIndex = Math.min(startIndex + size, totalResults);
-            
-            if (startIndex >= totalResults) {
-                finalResults = Collections.emptyList();
+            // Get the subset of results for the requested page
+            List<Map<String, Object>> pagedResults;
+            if (fromIndex < totalResults) {
+                pagedResults = allResults.subList(fromIndex, toIndex);
+                // Format the results to improve display quality
+                pagedResults = pagedResults.stream()
+                    .map(this::formatSearchResult)
+                    .collect(Collectors.toList());
             } else {
-                finalResults = allResults.subList(startIndex, endIndex);
+                pagedResults = Collections.emptyList();
             }
             
-            // Calculate pagination information
-            int totalPages = (int) Math.ceil((double) totalResults / size);
-            boolean hasNextPage = page < totalPages;
-            boolean hasPreviousPage = page > 1;
+            // Calculate elapsed time
+            long elapsedTime = System.currentTimeMillis() - startTime;
             
+            // Return formatted response
             Map<String, Object> response = new HashMap<>();
-            response.put("results", finalResults);
-            response.put("totalResults", totalResults);
-            response.put("currentPage", page);
-            response.put("pageSize", size);
-            response.put("totalPages", totalPages);
-            response.put("hasNextPage", hasNextPage);
-            response.put("hasPreviousPage", hasPreviousPage);
-            response.put("sessionId", currentSessionId);
-            
-            // Add range information (e.g., "Showing results 11-20 of 45")
-            int startItem = totalResults > 0 ? (page - 1) * size + 1 : 0;
-            int endItem = Math.min(page * size, totalResults);
-            response.put("startItem", startItem);
-            response.put("endItem", endItem);
-            
-            // Add suggested queries based on frequency analysis
-            if (!queryResult.getStemmedWords().isEmpty()) {
-                List<String> suggestedQueries = generateSuggestedQueries(
-                    queryResult.getStemmedWords(), 
-                    allResults, 
-                    3  // Max number of suggestions
-                );
-                response.put("suggestedQueries", suggestedQueries);
-            }
-            
-            // Additional metadata
-            response.put("phrases", queryResult.getPhrases());
-            response.put("stemmedWords", queryResult.getStemmedWords());
-            response.put("isPhraseQuery", queryResult.isPhraseQuery());
-            response.put("operator", queryResult.getOperator());
-            response.put("rankingFactors", getRankingFactors());
+            response.put("query", query);
+            response.put("results", pagedResults);
+            response.put("total_results", totalResults);
+            response.put("page", page);
+            response.put("page_size", pageSize);
+            response.put("session_id", newSessionId);
+            response.put("time_ms", elapsedTime);
             
             return ResponseEntity.ok(response);
         } catch (Exception e) {
-            // Handle out of memory and other exceptions
-            logger.error("Error processing search request: {}", e.getMessage(), e);
-            
-            Map<String, Object> errorResponse = new HashMap<>();
-            errorResponse.put("error", "An error occurred while processing your search");
-            errorResponse.put("results", Collections.emptyList());
-            errorResponse.put("totalResults", 0);
-            errorResponse.put("currentPage", page);
-            errorResponse.put("pageSize", size);
-            errorResponse.put("totalPages", 0);
-            errorResponse.put("hasNextPage", false);
-            errorResponse.put("hasPreviousPage", false);
-            
-            return ResponseEntity.ok(errorResponse);
+            logger.error("Error during search", e);
+            Map<String, Object> error = new HashMap<>();
+            error.put("error", "Search failed: " + e.getMessage());
+            return ResponseEntity.internalServerError().body(error);
         }
+    }
+    
+    /**
+     * Format a search result for display to improve its appearance
+     */
+    private Map<String, Object> formatSearchResult(Map<String, Object> result) {
+        Map<String, Object> formatted = new HashMap<>(result);
+        
+        // Format the description/snippet to make it more readable
+        String description = (String) result.get("snippet");
+        if (description != null) {
+            // Remove any base64 or data URIs which can be long and useless
+            description = description.replaceAll("data:[^\\s]*;base64,[^\\s]*", "");
+            
+            // Remove any JS variable declarations
+            description = description.replaceAll("var\\s+[^=]+=\\s*[^;]*;", "");
+            
+            // Remove any CSS style blocks
+            description = description.replaceAll("\\{--[^}]*\\}", "");
+            
+            // Remove any JSON/object literals
+            description = description.replaceAll("\\{[\"'][^}]*\\}", "");
+            
+            // Truncate if too long
+            if (description.length() > 200) {
+                description = description.substring(0, 200) + "...";
+            }
+            
+            // Clean up whitespace
+            description = description.replaceAll("\\s+", " ").trim();
+            
+            // Update the snippet with the cleaned description
+            formatted.put("snippet", description);
+        }
+        
+        return formatted;
     }
     
     /**
@@ -359,7 +350,9 @@ public class QueryController {
                 String[] titleTerms = title.toLowerCase().split("\\W+");
                 for (String term : titleTerms) {
                     if (term.length() > 3 && !isStopWord(term)) {
-                        termFrequency.put(term, termFrequency.getOrDefault(term, 0) + 3);  // Weight title terms higher
+                        // Use max instead of sum
+                        int currentWeight = 3;  // Weight title terms higher
+                        termFrequency.put(term, Math.max(termFrequency.getOrDefault(term, 0), currentWeight));
                     }
                 }
             }
@@ -370,7 +363,9 @@ public class QueryController {
                 String[] snippetTerms = snippet.toLowerCase().split("\\W+");
                 for (String term : snippetTerms) {
                     if (term.length() > 3 && !isStopWord(term)) {
-                        termFrequency.put(term, termFrequency.getOrDefault(term, 0) + 1);
+                        // Use max instead of sum
+                        int currentWeight = 1;
+                        termFrequency.put(term, Math.max(termFrequency.getOrDefault(term, 0), currentWeight));
                     }
                 }
             }
@@ -420,7 +415,7 @@ public class QueryController {
     @GetMapping("/voice-search")
     public ResponseEntity<Map<String, Object>> voiceSearch(@RequestParam String query) {
         // Same as regular search but could add voice-specific logic
-        return search(query, null, 1, 10);
+        return search(query, 1, 10, null);
     }
 
     /**

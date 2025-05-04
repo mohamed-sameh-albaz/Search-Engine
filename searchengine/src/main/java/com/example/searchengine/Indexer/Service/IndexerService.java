@@ -7,6 +7,9 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Element;
@@ -15,16 +18,25 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.dao.DataIntegrityViolationException;
 
 import com.example.searchengine.Crawler.Entities.Document;
 import com.example.searchengine.Crawler.Repository.DocumentRepository;
 import com.example.searchengine.Indexer.Entities.InvertedIndex;
 import com.example.searchengine.Indexer.Entities.Word;
+import com.example.searchengine.Indexer.Entities.WordDocumentMetrics;
 import com.example.searchengine.Indexer.Entities.WordDocumentTag;
+import com.example.searchengine.Indexer.Entities.WordIdf;
+import com.example.searchengine.Indexer.Entities.WordPosition;
+import com.example.searchengine.Indexer.Service.PreIndexer;
 import com.example.searchengine.Indexer.Repository.InvertedIndexRepository;
+import com.example.searchengine.Indexer.Repository.WordDocumentMetricsRepository;
 import com.example.searchengine.Indexer.Repository.WordDocumentTagRepository;
+import com.example.searchengine.Indexer.Repository.WordIdfRepository;
 import com.example.searchengine.Indexer.Repository.WordRepository;
+import com.example.searchengine.Indexer.Repository.WordPositionRepository;
+import com.example.searchengine.controllers.ReindexController;
 
 @Service
 public class IndexerService {
@@ -33,18 +45,24 @@ public class IndexerService {
     private final DocumentRepository documentRepository;
     private final WordDocumentTagRepository wordDocumentTagRepository;
     private final InvertedIndexRepository invertedIndexRepository;
+    private final WordIdfRepository wordIdfRepository;
+    private final WordDocumentMetricsRepository wordDocumentMetricsRepository;
+    private final WordPositionRepository wordPositionRepository;
     private final JdbcTemplate jdbcTemplate;
     private final PreIndexer preIndexer;
-    private static final List<String> TAGS_TO_INDEX = Arrays.asList("p", "h1", "h2", "h3");
 
     @Autowired
     public IndexerService(WordRepository wordRepository, DocumentRepository documentRepository,
             WordDocumentTagRepository wordDocumentTagRepository, InvertedIndexRepository invertedIndexRepository,
-            PreIndexer preIndexer, JdbcTemplate jdbcTemplate) {
+            WordIdfRepository wordIdfRepository, WordDocumentMetricsRepository wordDocumentMetricsRepository,
+            WordPositionRepository wordPositionRepository, PreIndexer preIndexer, JdbcTemplate jdbcTemplate) {
         this.wordRepository = wordRepository;
         this.documentRepository = documentRepository;
         this.wordDocumentTagRepository = wordDocumentTagRepository;
         this.invertedIndexRepository = invertedIndexRepository;
+        this.wordIdfRepository = wordIdfRepository;
+        this.wordDocumentMetricsRepository = wordDocumentMetricsRepository;
+        this.wordPositionRepository = wordPositionRepository;
         this.jdbcTemplate = jdbcTemplate;
         this.preIndexer = preIndexer;
     }
@@ -52,24 +70,35 @@ public class IndexerService {
     private static class WordInfo {
         Map<String, Integer> tagFrequencies = new HashMap<>();
         int totalFrequency = 0;
+        Map<String, List<Integer>> tagPositions = new HashMap<>(); // Store positions for each tag
 
         void addFrequency(String tag, int frequency) {
             tagFrequencies.put(tag, tagFrequencies.getOrDefault(tag, 0) + frequency);
             totalFrequency += frequency;
+        }
+        
+        void addPosition(String tag, int position) {
+            if (!tagPositions.containsKey(tag)) {
+                tagPositions.put(tag, new ArrayList<>());
+            }
+            tagPositions.get(tag).add(position);
         }
     }
 
     private Map<String, WordInfo> extractWordsFromTag(Element element, String tag) {
         Map<String, WordInfo> wordInfo = new HashMap<>();
         String text = element.text();
-        // text = text.replaceAll("[^a-zA-Z]", " ");
-        // String[] words = text.split("\\s+");
         List<String> words = preIndexer.tokenize(text);
         words = preIndexer.removeStopWords(words);
         words = preIndexer.Stemming(words);
+        
+        // Track position of each word within the element
+        int position = 0;
         for (String word : words) {
             WordInfo info = wordInfo.computeIfAbsent(word, k -> new WordInfo());
             info.addFrequency(tag, 1);
+            info.addPosition(tag, position);
+            position++;
         }
         return wordInfo;
     }
@@ -111,12 +140,32 @@ public class IndexerService {
 
     @Transactional(noRollbackFor = DataIntegrityViolationException.class)
     private void indexPage(String url, String html) {
-        System.out.println("hello from the indexer");
+        System.out.println("Indexing page: " + url);
         org.jsoup.nodes.Document doc = Jsoup.parse(html); // parse the html
         Document documentEntity = documentRepository.findByUrl(url).orElse(null); // check for existence
         Map<String, WordInfo> pageWordInfo = new HashMap<>(); // store the page info
+        
+        // Get the total word count in the document for TF calculation
+        String fullText = doc.text();
+        List<String> allWords = preIndexer.tokenize(fullText);
+        allWords = preIndexer.removeStopWords(allWords);
+        allWords = preIndexer.Stemming(allWords);
+        int totalWordCount = allWords.size();
 
-        for (String tag : TAGS_TO_INDEX) {
+        // Map to assign importance values to different HTML tags
+        Map<String, Integer> tagImportance = new HashMap<>();
+        tagImportance.put("title", 10); // Title has highest importance
+        tagImportance.put("h1", 8);
+        tagImportance.put("h2", 6);
+        tagImportance.put("h3", 4);
+        tagImportance.put("p", 2);
+        
+        // Add title tag to indexed tags
+        List<String> tagsToIndex = new ArrayList<>(Arrays.asList("p", "h1", "h2", "h3"));
+        tagsToIndex.add("title");
+
+        // Process each tag in the document
+        for (String tag : tagsToIndex) {
             for (org.jsoup.nodes.Element element : doc.select(tag)) { // for each element in the html document
                 Map<String, WordInfo> wordInfoMap = extractWordsFromTag(element, tag);
                 for (Map.Entry<String, WordInfo> entry : wordInfoMap.entrySet()) { // for each word in the tag
@@ -127,6 +176,15 @@ public class IndexerService {
                         pageInfo.tagFrequencies.put(tagEntry.getKey(),
                                 pageInfo.tagFrequencies.getOrDefault(tagEntry.getKey(), 0)
                                         + tagEntry.getValue());
+                    }
+                    // Copy position information
+                    for (Map.Entry<String, List<Integer>> posEntry : tagInfo.tagPositions.entrySet()) {
+                        String posTag = posEntry.getKey();
+                        List<Integer> positions = posEntry.getValue();
+                        if (!pageInfo.tagPositions.containsKey(posTag)) {
+                            pageInfo.tagPositions.put(posTag, new ArrayList<>());
+                        }
+                        pageInfo.tagPositions.get(posTag).addAll(positions);
                     }
                     pageInfo.totalFrequency += tagInfo.totalFrequency;
                 }
@@ -149,89 +207,224 @@ public class IndexerService {
                     });
             
             try {
+                // Calculate TF = frequency in document / total words in document
+                double tf = (double) info.totalFrequency / totalWordCount;
+                
+                // Determine importance - use the highest importance from all tags this word appears in
+                int importance = 1; // Default importance
+                for (String tag : info.tagFrequencies.keySet()) {
+                    int tagImp = tagImportance.getOrDefault(tag, 1);
+                    if (tagImp > importance) {
+                        importance = tagImp;
+                    }
+                }
+                
                 // Update word total frequency
-            jdbcTemplate.update(
+                jdbcTemplate.update(
                     "UPDATE words SET total_frequency = total_frequency + ? WHERE id = ?",
                     info.totalFrequency, word.getId());
 
-                // Insert into inverted_index with ON CONFLICT DO UPDATE
-            jdbcTemplate.update(
-                        "INSERT INTO inverted_index (word_id, doc_id, frequency) VALUES (?, ?, ?) " +
-                        "ON CONFLICT (word_id, doc_id) DO UPDATE SET frequency = inverted_index.frequency + EXCLUDED.frequency",
-                    word.getId(), documentEntity.getId(), info.totalFrequency);
+                // Insert into inverted_index with TF and importance values
+                jdbcTemplate.update(
+                        "INSERT INTO inverted_index (word_id, doc_id, frequency, tf, importance) VALUES (?, ?, ?, ?, ?) " +
+                        "ON CONFLICT (word_id, doc_id) DO UPDATE SET frequency = inverted_index.frequency + EXCLUDED.frequency, " +
+                        "tf = EXCLUDED.tf, importance = GREATEST(inverted_index.importance, EXCLUDED.importance)",
+                    word.getId(), documentEntity.getId(), info.totalFrequency, tf, importance);
 
                 // Process each tag
-            for (Map.Entry<String, Integer> tagEntry : info.tagFrequencies.entrySet()) {
-                String tag = tagEntry.getKey();
-                int tagFrequency = tagEntry.getValue();
+                for (Map.Entry<String, Integer> tagEntry : info.tagFrequencies.entrySet()) {
+                    String tag = tagEntry.getKey();
+                    int tagFrequency = tagEntry.getValue();
 
                     // Insert into word_document_tags with ON CONFLICT DO UPDATE
-                jdbcTemplate.update(
+                    jdbcTemplate.update(
                             "INSERT INTO word_document_tags (word_id, doc_id, tag, frequency) VALUES (?, ?, ?, ?) " +
                             "ON CONFLICT (word_id, doc_id, tag) DO UPDATE SET frequency = word_document_tags.frequency + EXCLUDED.frequency",
                         word.getId(), documentEntity.getId(), tag, tagFrequency);
+                }
+                
+                // Store word positions
+                for (Map.Entry<String, List<Integer>> posEntry : info.tagPositions.entrySet()) {
+                    String tag = posEntry.getKey();
+                    List<Integer> positions = posEntry.getValue();
+                    
+                    for (Integer position : positions) {
+                        // Use batch insert for better performance with many positions
+                        jdbcTemplate.update(
+                                "INSERT INTO word_position (word_id, doc_id, position, tag) VALUES (?, ?, ?, ?) " +
+                                "ON CONFLICT DO NOTHING",
+                            word.getId(), documentEntity.getId(), position, tag);
+                    }
                 }
             } catch (Exception e) {
                 // Log error but continue processing other words
                 System.err.println("Error indexing word " + wordText + " in document " + url + ": " + e.getMessage());
             }
         }
+        
+        // Update document as indexed
+        documentEntity.setLastIndexed(LocalDateTime.now());
+        documentRepository.save(documentEntity);
     }
 
-    @Transactional
-    public void buildIndex(Map<String, String> pages) {
-        if (pages.isEmpty()) {
+    /**
+     * Main method to build the inverted index
+     */
+    public void buildIndex(Map<String, String> documents) {
+        if (documents.isEmpty()) {
+            System.out.println("No documents to index");
             return;
         }
         
-        // For small batches, don't print as much information
-        boolean isSmallBatch = pages.size() <= 20;
+        System.out.println("Indexing " + documents.size() + " documents in batches with multi-threading");
         
-        if (!isSmallBatch) {
-            System.out.println("------------------------------------------------------------");
-            System.out.println("Starting indexing of " + pages.size() + " documents");
-            System.out.println("------------------------------------------------------------");
+        // Clear any existing caches
+        CacheHelper.clearInvertedIndexCache();
+        
+        final int BATCH_SIZE = 20; // Process 20 documents per batch
+        final int NUM_THREADS = Math.min(Runtime.getRuntime().availableProcessors(), 8); // Use available processors but cap at 8
+        
+        // Create batches of documents
+        List<Map.Entry<String, String>> docEntries = new ArrayList<>(documents.entrySet());
+        List<List<Map.Entry<String, String>>> batches = splitIntoBatches(docEntries, BATCH_SIZE);
+        
+        System.out.println("Split into " + batches.size() + " batches with " + NUM_THREADS + " threads");
+        
+        // Track progress
+        AtomicInteger processedCount = new AtomicInteger(0);
+        int totalDocuments = documents.size();
+        
+        // Process each batch
+        for (List<Map.Entry<String, String>> batch : batches) {
+            processBatchWithThreads(batch, NUM_THREADS);
+            
+            // Update progress after each batch
+            int currentProcessed = processedCount.addAndGet(batch.size());
+            
+            // Use static method instead of direct controller reference
+            com.example.searchengine.controllers.ReindexController.updateIndexingProgress(currentProcessed);
+            
+            System.out.printf("Processed %d/%d documents (%.1f%%)\n", 
+                currentProcessed, totalDocuments, (100.0 * currentProcessed / totalDocuments));
         }
         
-        int processedCount = 0;
-        int totalDocuments = pages.size();
-        long startTime = System.currentTimeMillis();
+        // Calculate IDF after all documents have been processed
+        System.out.println("All documents indexed. Calculating IDF values...");
+        calculateAllIdfValues();
         
-        for (Map.Entry<String, String> entry : pages.entrySet()) {
-            String url = entry.getKey();
-            String html = entry.getValue();
-            
-            try {
-                // Process document
-                indexPage(url, html);
-                
-                // Update progress
-                processedCount++;
-                
-                // Only show detailed progress for larger batches
-                if (!isSmallBatch && (processedCount % 10 == 0 || processedCount == totalDocuments)) {
-                    long elapsedTime = System.currentTimeMillis() - startTime;
-                    double progressPercent = 100.0 * processedCount / totalDocuments;
-                    System.out.printf("Indexed %d/%d documents (%.1f%%) - Elapsed time: %.2fs\n", 
-                        processedCount, totalDocuments, progressPercent, elapsedTime / 1000.0);
+        System.out.println("Indexing completed successfully");
+    }
+
+    /**
+     * Process a batch of documents using multiple threads
+     */
+    private void processBatchWithThreads(List<Map.Entry<String, String>> batch, int numThreads) {
+        List<List<Map.Entry<String, String>>> threadBatches = splitIntoBatches(batch, numThreads);
+        List<Thread> threads = new ArrayList<>();
+        
+        for (List<Map.Entry<String, String>> threadBatch : threadBatches) {
+            Thread thread = new Thread(() -> {
+                for (Map.Entry<String, String> entry : threadBatch) {
+                    try {
+                        indexPage(entry.getKey(), entry.getValue());
+                    } catch (Exception e) {
+                        System.err.println("Error processing document " + entry.getKey() + ": " + e.getMessage());
+                        e.printStackTrace();
+                    }
                 }
-            } catch (Exception e) {
-                System.out.println("Error indexing page " + url + ": " + e.getMessage());
+            });
+            threads.add(thread);
+            thread.start();
+        }
+        
+        // Wait for all threads to complete
+        for (Thread thread : threads) {
+            try {
+                thread.join();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                System.err.println("Thread interrupted: " + e.getMessage());
             }
         }
         
-        // Only show summary for larger batches
-        if (!isSmallBatch) {
-            long totalTime = System.currentTimeMillis() - startTime;
-            System.out.println("------------------------------------------------------------");
-            System.out.println("Indexing completed: " + processedCount + " documents indexed in " + (totalTime / 1000.0) + " seconds");
-            System.out.println("Average time per document: " + (totalTime / (double)processedCount) + " ms");
-            System.out.println("------------------------------------------------------------");
+        // Commit changes to database after each batch
+        System.out.println("Committing batch to database...");
+        // If using JdbcTemplate, you might need to flush manually if there's caching involved
+        // Otherwise, Spring Data JPA should auto-commit after each repository save
+    }
+
+    /**
+     * Split a list into approximately equal-sized batches
+     */
+    private <T> List<List<T>> splitIntoBatches(List<T> list, int batchSize) {
+        List<List<T>> batches = new ArrayList<>();
+        
+        if (list.isEmpty()) {
+            return batches;
         }
         
-        // Encourage garbage collection
-        pages = null;
-        System.gc();
+        int size = list.size();
+        int start = 0;
+        
+        while (start < size) {
+            int end = Math.min(start + batchSize, size);
+            batches.add(new ArrayList<>(list.subList(start, end)));
+            start = end;
+        }
+        
+        return batches;
+    }
+
+    /**
+     * Calculate IDF values for all words after indexing is complete
+     */
+    public void calculateAllIdfValues() {
+        System.out.println("Calculating IDF values for all words...");
+        
+        long totalDocuments = documentRepository.count();
+        if (totalDocuments == 0) {
+            System.out.println("No documents found, skipping IDF calculation");
+            return;
+        }
+        
+        // Get all words
+        List<Word> allWords = wordRepository.findAll();
+        
+        // Process in batches to avoid memory issues
+        final int BATCH_SIZE = 500;
+        List<List<Word>> batches = splitIntoBatches(allWords, BATCH_SIZE);
+        
+        for (List<Word> batch : batches) {
+            for (Word word : batch) {
+                try {
+                    // Count documents containing this word using SQL query instead of repository method
+                    long docCount = jdbcTemplate.queryForObject(
+                        "SELECT COUNT(*) FROM inverted_index WHERE word_id = ?", 
+                        Long.class,
+                        word.getId()
+                    );
+                    
+                    // Calculate IDF: log(totalDocs/(docCount+1))
+                    // Adding 1 to avoid division by zero
+                    double idf = Math.log10((double) totalDocuments / (docCount + 1));
+                    
+                    // Update or create WordIdf entry
+                    WordIdf wordIdf = wordIdfRepository.findByWord(word)
+                            .orElse(new WordIdf());
+                    
+                    wordIdf.setWord(word);
+                    wordIdf.setIdfValue(idf);
+                    wordIdf.setDocumentFrequency(docCount);
+                    wordIdf.setTotalDocuments(totalDocuments);
+                    
+                    wordIdfRepository.save(wordIdf);
+                } catch (Exception e) {
+                    System.err.println("Error calculating IDF for word " + word.getWord() + ": " + e.getMessage());
+                }
+            }
+        }
+        
+        System.out.println("IDF calculation completed for " + allWords.size() + " words");
     }
 
     public Map<String, Map<String, Object>> getIndex() {
@@ -309,6 +502,13 @@ public class IndexerService {
             // Calculate optimal thread count based on CPU cores
             int numThreads = Math.max(2, Runtime.getRuntime().availableProcessors());
             System.out.println("Using " + numThreads + " threads for parallel index building");
+            
+            // If there are no words, return an empty index
+            if (totalWords == 0) {
+                System.out.println("No words found in the database, returning empty index");
+                CacheHelper.setInvertedIndexCache(index);
+                return index;
+            }
             
             // Create an execution service for parallel processing
             java.util.concurrent.ExecutorService executor = 
@@ -435,6 +635,10 @@ public class IndexerService {
         public static void setInvertedIndexCache(Map<String, Map<Long, Integer>> index) {
             invertedIndexCache = index;
         }
+        
+        public static void clearInvertedIndexCache() {
+            invertedIndexCache = null;
+        }
     }
 
     /**
@@ -494,6 +698,12 @@ public class IndexerService {
     private <T> List<List<T>> splitIntoChunks(List<T> list, int numChunks) {
         List<List<T>> chunks = new ArrayList<>();
         int size = list.size();
+        
+        // Return single empty chunk if list is empty
+        if (size == 0) {
+            chunks.add(new ArrayList<>());
+            return chunks;
+        }
         
         // Adjust number of chunks if list is smaller
         numChunks = Math.min(numChunks, size);
@@ -573,6 +783,249 @@ public class IndexerService {
         bar.append(String.format(" (%d/%d)", current, total));
         
         return bar.toString();
+    }
+
+    /**
+     * Compute and store IDF values for all words in the index
+     * These values are used for faster relevance ranking during search
+     */
+    @Transactional
+    @Async
+    public void computeAndStoreMetrics() {
+        System.out.println("Starting metrics computation for faster search relevance...");
+        long startTime = System.currentTimeMillis();
+        
+        // Get total document count
+        long totalDocuments = documentRepository.count();
+        if (totalDocuments == 0) {
+            System.out.println("No documents found, skipping metrics computation");
+            return;
+        }
+        
+        System.out.println("Computing metrics for " + totalDocuments + " documents");
+        
+        // First, compute and store IDF values for all words
+        computeAndStoreIdfValues(totalDocuments);
+        
+        // Then, compute and store TF and TF-IDF values for all word-document pairs
+        computeAndStoreTfIdfValues(totalDocuments);
+        
+        long totalTime = System.currentTimeMillis() - startTime;
+        System.out.println("------------------------------------------------------------");
+        System.out.println("Metrics computation completed in " + (totalTime / 1000.0) + " seconds");
+        System.out.println("------------------------------------------------------------");
+    }
+    
+    /**
+     * Compute and store IDF values for all words
+     */
+    @Transactional
+    private void computeAndStoreIdfValues(long totalDocuments) {
+        System.out.println("Computing IDF values for all words...");
+        long startTime = System.currentTimeMillis();
+        
+        // Process words in batches to avoid memory issues
+        int pageSize = 1000;
+        int page = 0;
+        boolean hasMore = true;
+        int processedCount = 0;
+        
+        while (hasMore) {
+            List<Word> wordBatch = wordRepository.findAll(PageRequest.of(page, pageSize)).getContent();
+            if (wordBatch.isEmpty()) {
+                hasMore = false;
+                continue;
+            }
+            
+            for (Word word : wordBatch) {
+                try {
+                    // Count documents containing this word
+                    long docFrequency = jdbcTemplate.queryForObject(
+                        "SELECT COUNT(DISTINCT doc_id) FROM inverted_index WHERE word_id = ?", 
+                        Long.class, 
+                        word.getId());
+                    
+                    if (docFrequency == 0) {
+                        // Skip words that don't appear in any document
+                        continue;
+                    }
+                    
+                    // Calculate IDF with smoothing to avoid division by zero and extreme values
+                    // IDF = log((1 + N) / (1 + df)) + 1
+                    double idf = Math.log((1.0 + totalDocuments) / (1.0 + docFrequency)) + 1.0;
+                    
+                    // Store or update IDF value
+                    Optional<WordIdf> existingIdf = wordIdfRepository.findByWord(word);
+                    if (existingIdf.isPresent()) {
+                        WordIdf wordIdf = existingIdf.get();
+                        wordIdf.setIdfValue(idf);
+                        wordIdf.setDocumentFrequency(docFrequency);
+                        wordIdf.setTotalDocuments(totalDocuments);
+                        wordIdfRepository.save(wordIdf);
+                    } else {
+                        WordIdf wordIdf = new WordIdf();
+                        wordIdf.setWord(word);
+                        wordIdf.setIdfValue(idf);
+                        wordIdf.setDocumentFrequency(docFrequency);
+                        wordIdf.setTotalDocuments(totalDocuments);
+                        wordIdfRepository.save(wordIdf);
+                    }
+                    
+                    processedCount++;
+                    
+                    // Show progress every 1000 words
+                    if (processedCount % 1000 == 0) {
+                        long elapsedTime = System.currentTimeMillis() - startTime;
+                        System.out.printf("Processed IDF for %d words - Elapsed time: %.2fs\n", 
+                            processedCount, elapsedTime / 1000.0);
+                    }
+                } catch (Exception e) {
+                    System.err.println("Error computing IDF for word " + word.getWord() + ": " + e.getMessage());
+                }
+            }
+            
+            page++;
+        }
+        
+        long totalTime = System.currentTimeMillis() - startTime;
+        System.out.println("IDF computation completed for " + processedCount + " words in " + (totalTime / 1000.0) + " seconds");
+    }
+    
+    /**
+     * Compute and store TF and TF-IDF values for all word-document pairs
+     */
+    @Transactional
+    private void computeAndStoreTfIdfValues(long totalDocuments) {
+        System.out.println("Computing TF-IDF scores for all word-document pairs...");
+        long startTime = System.currentTimeMillis();
+        
+        // Get document length information (total terms per document)
+        Map<Long, Long> docLengths = getDocumentCnt();
+        
+        // Calculate average document length for BM25-style normalization
+        double avgDocLength = docLengths.values().stream()
+                .mapToLong(Long::longValue)
+                .average()
+                .orElse(500.0); // fallback to 500 if no data
+        
+        // Process in batches by word to avoid memory issues
+        int pageSize = 100;
+        int page = 0;
+        boolean hasMore = true;
+        AtomicLong processedPairs = new AtomicLong(0);
+        
+        // BM25 parameters
+        final double k1 = 1.2; // Controls term frequency scaling
+        final double b = 0.75; // Controls document length normalization
+        
+        while (hasMore) {
+            List<Word> wordBatch = wordRepository.findAll(PageRequest.of(page, pageSize)).getContent();
+            if (wordBatch.isEmpty()) {
+                hasMore = false;
+                continue;
+            }
+            
+            for (Word word : wordBatch) {
+                try {
+                    // Get IDF for this word
+                    Optional<WordIdf> wordIdfOpt = wordIdfRepository.findByWord(word);
+                    if (!wordIdfOpt.isPresent()) {
+                        continue; // Skip if IDF not computed
+                    }
+                    
+                    double idf = wordIdfOpt.get().getIdfValue();
+                    
+                    // Get all documents containing this word
+                    List<InvertedIndex> indexEntries = invertedIndexRepository.findByWordId(word.getId());
+                    
+                    // Store maximum TF-IDF for normalization
+                    double maxTfIdf = 0.0;
+                    
+                    // First pass: calculate TF-IDF scores and find max
+                    List<WordDocumentMetrics> metricsToSave = new ArrayList<>();
+                    
+                    for (InvertedIndex entry : indexEntries) {
+                        Long docId = entry.getDocument().getId();
+                        Integer frequency = entry.getFrequency();
+                        
+                        // Get document length, use the avgDocLength as a default if not found
+                        Long docLength = docLengths.containsKey(docId) ? docLengths.get(docId) : (long) avgDocLength;
+                        
+                        // Calculate normalized document length for BM25
+                        double normDocLength = docLength / avgDocLength;
+                        
+                        // Calculate BM25-style term frequency component
+                        double tf = ((double) frequency * (k1 + 1)) / 
+                                  (frequency + k1 * (1 - b + b * normDocLength));
+                        
+                        // Calculate TF-IDF score
+                        double tfIdf = tf * idf;
+                        
+                        // Keep track of maximum TF-IDF
+                        maxTfIdf = Math.max(maxTfIdf, tfIdf);
+                        
+                        WordDocumentMetrics metrics = new WordDocumentMetrics();
+                        metrics.setWord(word);
+                        metrics.setDocument(entry.getDocument());
+                        metrics.setFrequency(frequency);
+                        metrics.setTermFrequency(tf);
+                        metrics.setTfIdfScore(tfIdf);
+                        metrics.setNormalizedScore(0.0); // Will be set in second pass
+                        
+                        metricsToSave.add(metrics);
+                    }
+                    
+                    // Second pass: normalize scores and save
+                    for (WordDocumentMetrics metrics : metricsToSave) {
+                        // Normalize to [0,1] range if max > 0
+                        if (maxTfIdf > 0) {
+                            metrics.setNormalizedScore(metrics.getTfIdfScore() / maxTfIdf);
+                        } else {
+                            metrics.setNormalizedScore(0.0);
+                        }
+                        
+                        // Save to database (use JDBC batch operations for better performance)
+                        try {
+                            // Check if entry already exists
+                            Optional<WordDocumentMetrics> existingMetrics = 
+                                wordDocumentMetricsRepository.findByWordAndDocument(metrics.getWord(), metrics.getDocument());
+                            
+                            if (existingMetrics.isPresent()) {
+                                // Update existing entry
+                                WordDocumentMetrics existing = existingMetrics.get();
+                                existing.setFrequency(metrics.getFrequency());
+                                existing.setTermFrequency(metrics.getTermFrequency());
+                                existing.setTfIdfScore(metrics.getTfIdfScore());
+                                existing.setNormalizedScore(metrics.getNormalizedScore());
+                                wordDocumentMetricsRepository.save(existing);
+                            } else {
+                                // Insert new entry
+                                wordDocumentMetricsRepository.save(metrics);
+                            }
+                            
+                            processedPairs.incrementAndGet();
+                        } catch (Exception e) {
+                            System.err.println("Error saving metrics: " + e.getMessage());
+                        }
+                    }
+                    
+                    // Show progress every 50 words
+                    if (processedPairs.get() % 1000 == 0) {
+                        long elapsedTime = System.currentTimeMillis() - startTime;
+                        System.out.printf("Processed TF-IDF for %d word-document pairs - Elapsed time: %.2fs\n", 
+                            processedPairs.get(), elapsedTime / 1000.0);
+                    }
+                } catch (Exception e) {
+                    System.err.println("Error computing TF-IDF for word " + word.getWord() + ": " + e.getMessage());
+                }
+            }
+            
+            page++;
+        }
+        
+        long totalTime = System.currentTimeMillis() - startTime;
+        System.out.println("TF-IDF computation completed for " + processedPairs.get() + 
+                " word-document pairs in " + (totalTime / 1000.0) + " seconds");
     }
 
 }

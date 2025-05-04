@@ -8,10 +8,12 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+import org.springframework.stereotype.Repository;
 
 import java.util.List;
 import java.util.Optional;
 
+@Repository
 public interface InvertedIndexRepository extends JpaRepository<InvertedIndex, Long> {
   Optional<InvertedIndex> findByWordAndDocument(Word word, Document document);
 
@@ -24,4 +26,10 @@ public interface InvertedIndexRepository extends JpaRepository<InvertedIndex, Lo
       "ON CONFLICT (word_id, doc_id) " +
       "DO UPDATE SET frequency = inverted_index.frequency + :frequency", nativeQuery = true)
   void upsert(@Param("wordId") Long wordId, @Param("docId") Long docId, @Param("frequency") Integer frequency);
+
+  List<InvertedIndex> findByWordId(Long wordId);
+
+  List<InvertedIndex> findByWord(Word word);
+
+  long countByWord(Word word);
 }
