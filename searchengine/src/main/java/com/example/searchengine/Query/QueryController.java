@@ -1,18 +1,13 @@
 package com.example.searchengine.Query;
 
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.ArrayList;
-import java.util.Set;
-import java.util.stream.Collectors;
-import java.util.Comparator;
+
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
@@ -173,7 +168,7 @@ public class QueryController {
         return result;
     }
 
-    @GetMapping("/process-query")
+    @GetMapping("/query-analysis")
     public ResponseEntity<Map<String, Object>> processQuery(@RequestParam String query) {
         QueryResult result = getQueryResult(query);
         
@@ -190,249 +185,19 @@ public class QueryController {
         return ResponseEntity.ok(response);
     }
     
-    /**
-     * Ensure the session cache doesn't exceed maximum size
-     */
-    private void ensureSessionCacheSize() {
-        if (searchSessionCache.size() > MAX_SESSION_SIZE) {
-            // Remove oldest entries if cache is too large
-            List<Map.Entry<String, SearchSession>> entries = new ArrayList<>(searchSessionCache.entrySet());
-            entries.sort(Comparator.comparingLong(e -> e.getValue().timestamp));
-            
-            int toRemove = searchSessionCache.size() - MAX_SESSION_SIZE;
-            for (int i = 0; i < toRemove; i++) {
-                if (i < entries.size()) {
-                    searchSessionCache.remove(entries.get(i).getKey());
-                }
-            }
-        }
-    }
     
     /**
      * Execute a query and get the result
      */
-    private QueryResult executeQuery(String query) {
-        return queryService.processQuery(query);
-    }
-    
-    @GetMapping("/query-search")
-    public ResponseEntity<Map<String, Object>> search(
-            @RequestParam String query,
-            @RequestParam(required = false, defaultValue = "1") int page,
-            @RequestParam(required = false, defaultValue = "10") int pageSize,
-            @RequestParam(required = false) String sessionId) {
-        
-        try {
-            long startTime = System.currentTimeMillis();
-            
-            // Use the cached results if available for the same session
-            String newSessionId = sessionId;
-            List<Map<String, Object>> allResults = null;
-            
-            if (sessionId != null && searchSessionCache.containsKey(sessionId)) {
-                SearchSession session = searchSessionCache.get(sessionId);
-                if (session.query.equals(query)) {
-                    allResults = session.results;
-                    logger.debug("Using cached results for session {}", sessionId);
-                }
-            }
-            
-            // If no cached results, perform the search
-            if (allResults == null) {
-                // Create a new session ID
-                newSessionId = UUID.randomUUID().toString();
-                
-                QueryResult result = executeQuery(query);
-                
-                // Store all results in a search session for consistent pagination
-                allResults = result.getResults();
-                
-                // Add to session cache
-                ensureSessionCacheSize();
-                searchSessionCache.put(newSessionId, new SearchSession(query, allResults));
-            }
-            
-            // Calculate pagination
-            int totalResults = allResults.size();
-            int fromIndex = (page - 1) * pageSize;
-            int toIndex = Math.min(fromIndex + pageSize, totalResults);
-            
-            // Get the subset of results for the requested page
-            List<Map<String, Object>> pagedResults;
-            if (fromIndex < totalResults) {
-                pagedResults = allResults.subList(fromIndex, toIndex);
-                // Format the results to improve display quality
-                pagedResults = pagedResults.stream()
-                    .map(this::formatSearchResult)
-                    .collect(Collectors.toList());
-            } else {
-                pagedResults = Collections.emptyList();
-            }
-            
-            // Calculate elapsed time
-            long elapsedTime = System.currentTimeMillis() - startTime;
-            
-            // Return formatted response
-            Map<String, Object> response = new HashMap<>();
-            response.put("query", query);
-            response.put("results", pagedResults);
-            response.put("total_results", totalResults);
-            response.put("page", page);
-            response.put("page_size", pageSize);
-            response.put("session_id", newSessionId);
-            response.put("time_ms", elapsedTime);
-            
-            return ResponseEntity.ok(response);
-        } catch (Exception e) {
-            logger.error("Error during search", e);
-            Map<String, Object> error = new HashMap<>();
-            error.put("error", "Search failed: " + e.getMessage());
-            return ResponseEntity.internalServerError().body(error);
-        }
-    }
-    
-    /**
-     * Format a search result for display to improve its appearance
-     */
-    private Map<String, Object> formatSearchResult(Map<String, Object> result) {
-        Map<String, Object> formatted = new HashMap<>(result);
-        
-        // Format the description/snippet to make it more readable
-        String description = (String) result.get("snippet");
-        if (description != null) {
-            // Remove any base64 or data URIs which can be long and useless
-            description = description.replaceAll("data:[^\\s]*;base64,[^\\s]*", "");
-            
-            // Remove any JS variable declarations
-            description = description.replaceAll("var\\s+[^=]+=\\s*[^;]*;", "");
-            
-            // Remove any CSS style blocks
-            description = description.replaceAll("\\{--[^}]*\\}", "");
-            
-            // Remove any JSON/object literals
-            description = description.replaceAll("\\{[\"'][^}]*\\}", "");
-            
-            // Truncate if too long
-            if (description.length() > 200) {
-                description = description.substring(0, 200) + "...";
-            }
-            
-            // Clean up whitespace
-            description = description.replaceAll("\\s+", " ").trim();
-            
-            // Update the snippet with the cleaned description
-            formatted.put("snippet", description);
-        }
-        
-        return formatted;
-    }
-    
-    /**
-     * Generates suggested alternative queries based on result analysis
-     */
-    private List<String> generateSuggestedQueries(List<String> originalTerms, List<Map<String, Object>> results, int maxSuggestions) {
-        if (results.isEmpty() || originalTerms.isEmpty()) {
-            return Collections.emptyList();
-        }
-        
-        // Extract frequent terms from top results
-        Map<String, Integer> termFrequency = new HashMap<>();
-        
-        // Look at top 20 results maximum
-        int maxResultsToProcess = Math.min(20, results.size());
-        
-        for (int i = 0; i < maxResultsToProcess; i++) {
-            Map<String, Object> result = results.get(i);
-            
-            // Extract terms from title
-            String title = (String) result.get("title");
-            if (title != null) {
-                String[] titleTerms = title.toLowerCase().split("\\W+");
-                for (String term : titleTerms) {
-                    if (term.length() > 3 && !isStopWord(term)) {
-                        // Use max instead of sum
-                        int currentWeight = 3;  // Weight title terms higher
-                        termFrequency.put(term, Math.max(termFrequency.getOrDefault(term, 0), currentWeight));
-                    }
-                }
-            }
-            
-            // Extract terms from snippet
-            String snippet = (String) result.get("snippet");
-            if (snippet != null) {
-                String[] snippetTerms = snippet.toLowerCase().split("\\W+");
-                for (String term : snippetTerms) {
-                    if (term.length() > 3 && !isStopWord(term)) {
-                        // Use max instead of sum
-                        int currentWeight = 1;
-                        termFrequency.put(term, Math.max(termFrequency.getOrDefault(term, 0), currentWeight));
-                    }
-                }
-            }
-        }
-        
-        // Filter out terms that are already in the original query
-        for (String original : originalTerms) {
-            termFrequency.remove(original.toLowerCase());
-        }
-        
-        // Sort terms by frequency
-        List<Map.Entry<String, Integer>> sortedTerms = new ArrayList<>(termFrequency.entrySet());
-        sortedTerms.sort(Map.Entry.<String, Integer>comparingByValue().reversed());
-        
-        // Generate suggestions by combining original query with new terms
-        List<String> suggestions = new ArrayList<>();
-        String baseQuery = String.join(" ", originalTerms);
-        
-        for (int i = 0; i < Math.min(maxSuggestions, sortedTerms.size()); i++) {
-            String term = sortedTerms.get(i).getKey();
-            suggestions.add(baseQuery + " " + term);
-        }
-        
-        return suggestions;
-    }
-    
-    /**
-     * Returns information about the ranking factors used
-     */
-    private Map<String, Object> getRankingFactors() {
-        Map<String, Object> factors = new HashMap<>();
-        factors.put("relevance", "Document relevance score based on TF-IDF");
-        factors.put("pageRank", "Link-based importance measure");
-        factors.put("termDensity", "Concentration of search terms in the document");
-        factors.put("diversity", "Result diversification to reduce redundancy");
-        return factors;
-    }
-    
-    /**
-     * Check if a word is a common stop word
-     */
-    private boolean isStopWord(String word) {
-        Set<String> stopWords = Set.of("the", "and", "for", "that", "with", "this", "from", "not", "but", "you", "all", "any");
-        return stopWords.contains(word.toLowerCase());
-    }
 
+    
+
+    
     @GetMapping("/voice-search")
     public ResponseEntity<Map<String, Object>> voiceSearch(@RequestParam String query) {
-        // Same as regular search but could add voice-specific logic
-        return search(query, 1, 10, null);
-    }
-
-    /**
-     * Determines if a query is related to the Middle East conflict
-     */
-    private boolean isMiddleEastConflictQuery(String query) {
-        // Key terms related to the Middle East conflict
-        Set<String> conflictTerms = Set.of("gaza", "israel", "palestin", "hama", "war", 
-            "idf", "hostage", "netanyahu", "sinwar", "ceasefire", "houthi", "lebanon", "hezbollah");
+        // For now, just delegate to the standard search with special tracking for voice
+        logger.info("Voice search: {}", query);
         
-        // Check if any of the conflict terms appear in the query
-        for (String term : conflictTerms) {
-            if (query.contains(term)) {
-                return true;
-            }
-        }
-        
-        return false;
+        return processQuery(query);
     }
 } 

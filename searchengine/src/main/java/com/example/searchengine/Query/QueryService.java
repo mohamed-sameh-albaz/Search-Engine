@@ -4,16 +4,12 @@ import org.springframework.stereotype.Service;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.lucene.analysis.Analyzer;
-import org.apache.lucene.analysis.TokenStream;
-import org.apache.lucene.analysis.snowball.SnowballFilter;
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
-import org.apache.lucene.analysis.tokenattributes.CharTermAttribute;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 
 import java.io.File;
-import java.io.IOException;
-import java.io.StringReader;
+
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.regex.Matcher;
@@ -21,9 +17,7 @@ import java.util.regex.Pattern;
 
 import com.example.searchengine.Crawler.Entities.Document;
 import com.example.searchengine.Crawler.Repository.DocumentsRepository;
-import com.example.searchengine.Indexer.Entities.InvertedIndex;
 import com.example.searchengine.Indexer.Entities.Word;
-import com.example.searchengine.Indexer.Entities.WordDocumentTag;
 import com.example.searchengine.Indexer.Repository.InvertedIndexRepository;
 import com.example.searchengine.Indexer.Repository.WordRepository;
 import com.example.searchengine.Indexer.Repository.WordDocumentTagRepository;
@@ -104,6 +98,11 @@ public class QueryService {
                 isPhraseQuery = true;
                 result.setPhraseQuery(true);
                 logger.info("Processing as exact phrase query: '{}'", query);
+                
+                // Use the new efficient phrase searching for full phrase queries
+                if (query.split("\\s+").length > 1) {
+                    return processFullPhraseQuery(query, result);
+                }
             }
             
             // Extract phrases (text between quotes) if not already a phrase query
@@ -167,6 +166,71 @@ public class QueryService {
             logger.error("Error processing query: {}", query, e);
             result.setErrorMessage("An error occurred while processing your query");
         }
+        
+        return result;
+    }
+    
+    /**
+     * Process a full phrase query using the optimized phrase searching implementation
+     */
+    private QueryResult processFullPhraseQuery(String phrase, QueryResult result) {
+        logger.info("Using optimized phrase search for: '{}'", phrase);
+        
+        // Create instance of PhraseSearching with all necessary dependencies
+        PhraseSearching phraseSearcher = new PhraseSearching(
+            phrase,
+            jdbcTemplate,
+            wordRepository,
+            documentRepository,
+            stopWords
+        );
+        
+        // Get the sorted results
+        List<Long> matchingDocIds = phraseSearcher.getSortedDocumentIds();
+        Map<Long, Double> docScores = phraseSearcher.getResults();
+        
+        // Add the phrase to the result
+        List<String> phrases = new ArrayList<>();
+        phrases.add(phrase);
+        result.setPhrases(phrases);
+        
+        // Create mapping for matching documents
+        Map<String, List<Long>> matchingDocuments = new HashMap<>();
+        matchingDocuments.put(phrase, matchingDocIds);
+        result.setMatchingDocuments(matchingDocuments);
+        
+        // Create stemmed words for snippet generation
+        List<String> stemmedWords = Arrays.stream(phrase.split("\\s+"))
+            .map(this::stemWord)
+            .filter(w -> !w.isEmpty())
+            .collect(Collectors.toList());
+        result.setStemmedWords(stemmedWords);
+        
+        // Fetch full document details with snippets
+        List<Map<String, Object>> searchResults = fetchDocumentDetails(stemmedWords, matchingDocIds);
+        
+        // Add scores from phrase searcher
+        for (Map<String, Object> doc : searchResults) {
+            Long docId = ((Number) doc.get("id")).longValue();
+            doc.put("score", docScores.getOrDefault(docId, 0.0));
+        }
+        
+        // Sort by relevance score
+        searchResults.sort((r1, r2) -> 
+            Double.compare(
+                ((Number) r2.get("score")).doubleValue(),
+                ((Number) r1.get("score")).doubleValue()
+            )
+        );
+        
+        // Apply final filtering
+        if (!searchResults.isEmpty()) {
+            searchResults = filterLowQualityResults(searchResults, stemmedWords, phrases);
+            result.setSuggestedQueries(generateSuggestedQueries(phrase, searchResults));
+        }
+        
+        result.setResults(searchResults);
+        logger.info("Optimized phrase search completed with {} results", searchResults.size());
         
         return result;
     }
@@ -436,319 +500,131 @@ public class QueryService {
     }
     
     private void processPhraseSearch(String phrase, Map<String, List<Long>> matchingDocuments) {
-        logger.info("Processing phrase search for: '{}'", phrase);
+        // Extract the phrase without quotes
+        String cleanPhrase = phrase.substring(1, phrase.length() - 1).trim().toLowerCase();
         
-        // Process a phrase search
-        List<String> words = Arrays.asList(phrase.toLowerCase().split("\\s+"));
-        
-        // Handling for single-word phrases (exact matches)
-        boolean isSingleWordPhrase = words.size() == 1 && !words.get(0).isEmpty();
-        if (isSingleWordPhrase) {
-            String word = words.get(0);
-            // For single-word phrases in quotes, we want exact matches
-            Optional<Word> wordEntity = wordRepository.findByWord(word);
-            if (wordEntity.isPresent()) {
-                try {
-                    // Try both tables - first check if word_position table exists
-                    boolean hasWordPositions = false;
-                    try {
-                        Integer count = jdbcTemplate.queryForObject(
-                            "SELECT COUNT(*) FROM word_position WHERE word_id = ? LIMIT 1",
-                            Integer.class,
-                            wordEntity.get().getId()
-                        );
-                        hasWordPositions = count != null && count > 0;
-                    } catch (Exception e) {
-                        logger.warn("Error checking word_position table: {}", e.getMessage());
-                    }
-                    
-                    List<Long> docIds;
-                    if (hasWordPositions) {
-                        docIds = jdbcTemplate.query(
-                            "SELECT DISTINCT doc_id FROM word_position WHERE word_id = ? LIMIT 5000",
-                            (rs, rowNum) -> rs.getLong("doc_id"),
-                            wordEntity.get().getId()
-                        );
-                    } else {
-                        // Fall back to inverted_index
-                        docIds = jdbcTemplate.query(
-                            "SELECT doc_id FROM inverted_index WHERE word_id = ? LIMIT 5000",
-                            (rs, rowNum) -> rs.getLong("doc_id"),
-                            wordEntity.get().getId()
-                        );
-                    }
-                    
-                    // Add to matching documents with the exact word as key
-                    matchingDocuments.put("\"" + word + "\"", docIds);
-                    logger.info("Found {} documents with exact match for word '{}'", docIds.size(), word);
-                } catch (Exception e) {
-                    logger.error("Error fetching single word matches: {}", e.getMessage());
-                    matchingDocuments.put("\"" + word + "\"", new ArrayList<>());
-                }
-                return;
-            } else {
-                // No exact matches found
-                matchingDocuments.put("\"" + word + "\"", new ArrayList<>());
-                return;
-            }
-        }
-        
-        // Filter out stop words and stem each word
-        List<String> filteredAndStemmed = words.stream()
-            .filter(word -> !stopWords.contains(word) && !word.isEmpty())
-            .map(this::stemWord)
-            .filter(stemmed -> !stemmed.isEmpty())
-            .collect(Collectors.toList());
-        
-        if (filteredAndStemmed.isEmpty()) {
+        // Skip empty phrases
+        if (cleanPhrase.isEmpty()) {
             return;
         }
         
-        // Log the phrase being searched
-        logger.info("Processing phrase search for: '{}', stemmed as: {}", phrase, filteredAndStemmed);
+        logger.info("Processing phrase search for: '{}'", cleanPhrase);
         
-        try {
-            // Get word IDs for all words in the phrase
-            List<Long> wordIds = new ArrayList<>();
-            Map<Long, String> wordIdToStemmed = new HashMap<>();
-            
-            for (String stemmed : filteredAndStemmed) {
-                Optional<Word> wordEntity = wordRepository.findByWord(stemmed);
-                if (!wordEntity.isPresent()) {
-                    // If any word doesn't exist, return empty results
-                    matchingDocuments.put(phrase, new ArrayList<>());
-                    return;
-                }
-                Long wordId = wordEntity.get().getId();
-                wordIds.add(wordId);
-                wordIdToStemmed.put(wordId, stemmed);
-            }
-            
-            if (wordIds.isEmpty()) {
-                matchingDocuments.put(phrase, new ArrayList<>());
-                return;
-            }
-            
-            // Check if word_position table exists and has data
-            boolean useWordPositions = false;
-            try {
-                Integer count = jdbcTemplate.queryForObject(
-                    "SELECT COUNT(*) FROM word_position WHERE word_id = ? LIMIT 1",
-                    Integer.class,
-                    wordIds.get(0)
-                );
-                useWordPositions = count != null && count > 0;
-            } catch (Exception e) {
-                logger.warn("Error checking word_position table: {}, falling back to content-based matching", e.getMessage());
-            }
-            
-            // Get documents containing the first word
-            List<Long> candidateDocIds;
-            if (useWordPositions) {
-                candidateDocIds = jdbcTemplate.query(
-                    "SELECT DISTINCT doc_id FROM word_position WHERE word_id = ? LIMIT 5000",
-                    (rs, rowNum) -> rs.getLong("doc_id"),
-                    wordIds.get(0)
-                );
-            } else {
-                // Fall back to inverted_index
-                candidateDocIds = jdbcTemplate.query(
-                    "SELECT doc_id FROM inverted_index WHERE word_id = ? LIMIT 5000",
-                    (rs, rowNum) -> rs.getLong("doc_id"),
-                    wordIds.get(0)
-                );
-            }
-            
-            if (candidateDocIds.isEmpty()) {
-                matchingDocuments.put(phrase, new ArrayList<>());
-                return;
-            }
-            
-            // Get documents containing all words in the phrase first
-            if (filteredAndStemmed.size() > 1) {
-                Set<Long> docsWithAllWords = new HashSet<>(candidateDocIds);
-                for (int i = 1; i < wordIds.size(); i++) {
-                    List<Long> docsWithWord;
-                    if (useWordPositions) {
-                        docsWithWord = jdbcTemplate.query(
-                            "SELECT DISTINCT doc_id FROM word_position WHERE word_id = ? LIMIT 5000",
-                            (rs, rowNum) -> rs.getLong("doc_id"),
-                            wordIds.get(i)
-                        );
-                    } else {
-                        // Fall back to inverted_index
-                        docsWithWord = jdbcTemplate.query(
-                            "SELECT doc_id FROM inverted_index WHERE word_id = ? LIMIT 5000",
-                            (rs, rowNum) -> rs.getLong("doc_id"),
-                            wordIds.get(i)
-                        );
-                    }
-                    docsWithAllWords.retainAll(docsWithWord);
-                    
-                    if (docsWithAllWords.isEmpty()) {
-                        matchingDocuments.put(phrase, new ArrayList<>());
-                        return;
-                    }
-                }
-                candidateDocIds = new ArrayList<>(docsWithAllWords);
-            }
-            
-            // Process documents in batches to check for exact phrase matches
-            List<Long> matchingDocs = new ArrayList<>();
-            int batchSize = 20; // Process 20 documents at a time
-            
-            for (int i = 0; i < candidateDocIds.size(); i += batchSize) {
-                int endIndex = Math.min(i + batchSize, candidateDocIds.size());
-                List<Long> batchDocIds = candidateDocIds.subList(i, endIndex);
-                
-                for (Long docId : batchDocIds) {
-                    if (checkPhraseMatch(docId, filteredAndStemmed)) {
-                        matchingDocs.add(docId);
-                    }
-                }
-            }
-            
-            logger.info("Found {} documents containing the exact phrase: '{}'", matchingDocs.size(), phrase);
-            matchingDocuments.put(phrase, matchingDocs);
-            
-        } catch (Exception e) {
-            logger.error("Error in phrase search for '{}': {}", phrase, e.getMessage());
-            matchingDocuments.put(phrase, new ArrayList<>());
-        }
-    }
-    
-    private boolean checkPhraseMatch(Long docId, List<String> stemmedPhrase) {
+        // Split the phrase into words and stem them
+        List<String> stemmedPhrase = Arrays.stream(cleanPhrase.split("\\s+"))
+                                         .map(this::stemWord)
+                                         .filter(word -> !stopWords.contains(word))
+                                         .collect(Collectors.toList());
+        
+        // Skip phrases with only stop words
         if (stemmedPhrase.isEmpty()) {
-            return false;
+            return;
         }
         
+        // Use first word in phrase to narrow down document set
+        String firstWord = stemmedPhrase.get(0);
+        List<Long> docsWithFirstWord = new ArrayList<>();
+        
+        // Look for the first word in the index
         try {
-            // Try first with a direct content check which is faster
+            // Get documents containing the first meaningful word (limit to 200 for performance)
+            String query = "SELECT DISTINCT doc_id FROM inverted_index " +
+                          "WHERE word_id IN (SELECT id FROM words WHERE word = ?) " +
+                          "LIMIT 200";
+            docsWithFirstWord = jdbcTemplate.queryForList(query, Long.class, firstWord);
+            
+            logger.info("Found {} documents containing first word '{}' of phrase", 
+                        docsWithFirstWord.size(), firstWord);
+        } catch (Exception e) {
+            logger.error("Error querying for documents with first word: {}", e.getMessage());
+        }
+        
+        List<Long> matchingDocs = new ArrayList<>();
+        int matchCount = 0;
+        final int MAX_PHRASE_RESULTS = 50; // Limit the number of phrase matches
+        
+        // Check each document for the exact phrase
+        for (Long docId : docsWithFirstWord) {
+            if (matchCount >= MAX_PHRASE_RESULTS) {
+                logger.info("Reached maximum phrase match count ({}), stopping search", MAX_PHRASE_RESULTS);
+                break;
+            }
+            
+            boolean hasPhrase = checkPhraseMatch(docId, stemmedPhrase);
+            if (hasPhrase) {
+                matchingDocs.add(docId);
+                matchCount++;
+                
+                // Limit logging verbosity
+                if (matchCount % 10 == 0 || matchCount <= 3) {
+                    logger.info("Found exact phrase match in document {}", docId);
+                }
+            }
+        }
+        
+        logger.info("Found {} documents matching phrase: '{}'", matchingDocs.size(), cleanPhrase);
+        matchingDocuments.put(phrase, matchingDocs);
+    }
+
+    private boolean checkPhraseMatch(Long docId, List<String> stemmedPhrase) {
+        try {
+            // Get document content
             Optional<Document> docOpt = documentRepository.findById(docId);
-            if (docOpt.isPresent()) {
-                Document doc = docOpt.get();
-                if (doc.getContent() != null) {
-                    // Parse HTML content
-                    org.jsoup.nodes.Document parsedDoc = org.jsoup.Jsoup.parse(doc.getContent());
-                    String text = parsedDoc.text().toLowerCase();
-                    
-                    // Check for the exact phrase in content
-                    String searchPhrase = String.join(" ", stemmedPhrase).toLowerCase();
-                    if (text.contains(searchPhrase)) {
-                        logger.debug("Document {} contains exact phrase match for '{}'", docId, searchPhrase);
-                        return true;
-                    }
-                    
-                    // Title check is also important
-                    if (doc.getTitle() != null && doc.getTitle().toLowerCase().contains(searchPhrase)) {
-                        logger.debug("Document {} contains exact phrase match in title for '{}'", docId, searchPhrase);
-                        return true;
-                    }
-                }
-            }
-            
-            // If content check doesn't find it, try the word position check
-            
-            // Cache word entities to avoid repeated lookups
-            Map<String, Long> wordIdCache = new HashMap<>();
-            
-            // Get all word IDs up front
-            for (String stemmed : stemmedPhrase) {
-                Word wordEntity = wordRepository.findByWord(stemmed).orElse(null);
-                if (wordEntity == null) {
-                    return false;
-                }
-                wordIdCache.put(stemmed, wordEntity.getId());
-            }
-            
-            // Get all first word positions to start checking from
-            Long firstWordId = wordIdCache.get(stemmedPhrase.get(0));
-            
-            // First check if word_position table exists and has records
-            boolean hasWordPositions = false;
-            try {
-                Integer positionCount = jdbcTemplate.queryForObject(
-                    "SELECT COUNT(*) FROM word_position WHERE word_id = ? AND doc_id = ?",
-                    Integer.class,
-                    firstWordId, docId
-                );
-                hasWordPositions = positionCount != null && positionCount > 0;
-            } catch (Exception e) {
-                logger.warn("Error checking word_position table: {}. Will fall back to paragraph-based matching.", e.getMessage());
-            }
-            
-            if (hasWordPositions) {
-                // Use word_position table for exact position matching
-                String positionsQuery = 
-                    "SELECT position FROM word_position " +
-                    "WHERE word_id = ? AND doc_id = ? " +
-                    "ORDER BY position";
-                
-                List<Integer> firstWordPositions = jdbcTemplate.query(
-                    positionsQuery,
-                    (rs, rowNum) -> rs.getInt("position"),
-                    firstWordId, docId
-                );
-                
-                if (firstWordPositions.isEmpty()) {
-                    return false;
-                }
-                
-                // For each position of the first word, check if we have a complete phrase match
-                for (Integer startPos : firstWordPositions) {
-                    boolean fullMatch = true;
-                    
-                    // Check each subsequent word position
-                    for (int i = 1; i < stemmedPhrase.size(); i++) {
-                        Long nextWordId = wordIdCache.get(stemmedPhrase.get(i));
-                        int expectedPos = startPos + i;
-                        
-                        // Check if the next word exists at the expected position
-                        int count = jdbcTemplate.queryForObject(
-                            "SELECT COUNT(*) FROM word_position " +
-                            "WHERE word_id = ? AND doc_id = ? AND position = ?",
-                            Integer.class,
-                            nextWordId, docId, expectedPos
-                        );
-                        
-                        if (count == 0) {
-                            fullMatch = false;
-                            break;
-                        }
-                    }
-                    
-                    if (fullMatch) {
-                        logger.info("Found exact phrase match in document {} at position {}", docId, startPos);
-                        return true;
-                    }
-                }
-            } else {
-                // Use paragraph-based word matching as fallback
-                // This is less precise but works even if word_position table isn't populated
-                for (int i = 0; i < stemmedPhrase.size(); i++) {
-                    Long wordId = wordIdCache.get(stemmedPhrase.get(i));
-                    
-                    // Check if this word appears in the document at all
-                    int count = jdbcTemplate.queryForObject(
-                        "SELECT COUNT(*) FROM inverted_index " +
-                        "WHERE word_id = ? AND doc_id = ?",
-                        Integer.class,
-                        wordId, docId
-                    );
-                    
-                    if (count == 0) {
-                        return false;
-                    }
-                }
-                
-                // If all words exist in the document and we already checked content
-                // for exact phrase match (which failed), return false
+            if (!docOpt.isPresent() || docOpt.get().getContent() == null) {
                 return false;
             }
             
+            Document doc = docOpt.get();
+            
+            // Check title first (faster than content)
+            if (doc.getTitle() != null) {
+                String titleText = Jsoup.parse(doc.getTitle()).text().toLowerCase();
+                String phraseText = String.join(" ", stemmedPhrase);
+                if (titleText.contains(phraseText)) {
+                    return true;
+                }
+            }
+            
+            // Parse and clean the document content
+            String content = doc.getContent();
+            String cleanContent = Jsoup.parse(content).text().toLowerCase();
+            
+            // Quick check for the whole phrase (faster than position checking)
+            String phraseText = String.join(" ", stemmedPhrase);
+            if (cleanContent.contains(phraseText)) {
+                return true;
+            }
+            
+            // For short phrases (2-3 words), the above check is sufficient
+            // Only do position checking for longer phrases if necessary
+            if (stemmedPhrase.size() <= 3 || cleanContent.length() < 1000) {
+                return false;
+            }
+            
+            // More thorough check only needed for complex cases
+            // Convert content to words and check for sequence
+            List<String> contentWords = Arrays.asList(cleanContent.split("\\s+"));
+            List<String> stemmedContentWords = contentWords.stream()
+                .map(this::stemWord)
+                .collect(Collectors.toList());
+            
+            // Look for the sequence of words in the stemmed content
+            for (int i = 0; i <= stemmedContentWords.size() - stemmedPhrase.size(); i++) {
+                boolean found = true;
+                for (int j = 0; j < stemmedPhrase.size(); j++) {
+                    if (!stemmedContentWords.get(i + j).equals(stemmedPhrase.get(j))) {
+                        found = false;
+                        break;
+                    }
+                }
+                if (found) {
+                    return true;
+                }
+            }
+            
             return false;
         } catch (Exception e) {
-            logger.error("Error in checkPhraseMatch for doc {}: {}", docId, e.getMessage());
+            logger.warn("Error checking phrase match for document {}: {}", docId, e.getMessage());
             return false;
         }
     }
@@ -838,29 +714,38 @@ public class QueryService {
     private List<Map<String, Object>> fetchPhraseSearchResults(String phrase, Map<String, List<Long>> matchingDocuments) {
         List<Long> matchingDocs = matchingDocuments.getOrDefault(phrase, new ArrayList<>());
         
-        logger.info("Fetching details for {} documents matching phrase '{}'", matchingDocs.size(), phrase);
+        // Extract the phrase without quotes
+        String cleanPhrase = phrase;
+        if (phrase.startsWith("\"") && phrase.endsWith("\"")) {
+            cleanPhrase = phrase.substring(1, phrase.length() - 1).trim();
+        }
         
-        // For phrase search, we split the phrase into words for snippet generation
-        List<String> phraseWords = Arrays.asList(phrase.toLowerCase().split("\\s+"));
+        logger.info("Fetching details for {} documents matching phrase '{}'", matchingDocs.size(), cleanPhrase);
+        
+        // For phrase search, we keep the complete phrase for snippet generation
+        // but also split it for the scoring algorithm
+        List<String> phraseWords = Arrays.asList(cleanPhrase.toLowerCase().split("\\s+"));
         List<String> filteredAndStemmed = phraseWords.stream()
             .filter(word -> !stopWords.contains(word) && !word.isEmpty())
             .map(this::stemWord)
             .filter(stemmed -> !stemmed.isEmpty())
             .collect(Collectors.toList());
         
-        // If it's a single word in quotes, also fetch as a direct word match
-        if (filteredAndStemmed.size() == 1) {
-            String exactWord = "\"" + filteredAndStemmed.get(0) + "\"";
-            List<Long> exactMatches = matchingDocuments.getOrDefault(exactWord, new ArrayList<>());
-            
-            // Combine the exact matches with any phrase matches
-            Set<Long> combinedDocs = new HashSet<>(matchingDocs);
-            combinedDocs.addAll(exactMatches);
-            
-            return fetchDocumentDetails(filteredAndStemmed, new ArrayList<>(combinedDocs));
+        // Store the original phrase as metadata for snippet generation
+        Map<String, Object> metadata = new HashMap<>();
+        metadata.put("isExactPhrase", true);
+        metadata.put("originalPhrase", cleanPhrase);
+        
+        // Create results with proper metadata for snippet generation
+        List<Map<String, Object>> results = fetchDocumentDetails(filteredAndStemmed, matchingDocs);
+        
+        // Add phrase metadata to each result
+        for (Map<String, Object> result : results) {
+            result.put("isExactPhrase", true);
+            result.put("queryPhrase", cleanPhrase);
         }
         
-        return fetchDocumentDetails(filteredAndStemmed, matchingDocs);
+        return results;
     }
 
     @Autowired
@@ -917,7 +802,28 @@ public class QueryService {
                                 result.put("score", score);
                                 
                                 // Generate a snippet highlighting the query terms
-                                String snippet = generateSnippet((String)docData.get("content"), stemmedWords);
+                                String snippet;
+                                
+                                // If we're looking for an exact phrase (stemmedWords.size() > 1), 
+                                // treat it as a phrase search for snippet generation
+                                boolean isExactPhraseSearch = stemmedWords.size() > 1;
+                                
+                                // Generate appropriate snippet based on search type
+                                if (isExactPhraseSearch) {
+                                    // For phrase searches, join the words back into a phrase for better matching
+                                    String searchPhrase = String.join(" ", stemmedWords);
+                                    
+                                    // Check if we're processing a phrase and need to highlight it exactly
+                                    if (docData.get("content") != null) {
+                                        snippet = generatePhraseSnippet((String)docData.get("content"), searchPhrase);
+                                    } else {
+                                        snippet = "No content available";
+                                    }
+                                } else {
+                                    // For regular searches, use the normal snippet generator
+                                    snippet = generateSnippet((String)docData.get("content"), stemmedWords);
+                                }
+                                
                                 result.put("snippet", snippet);
                                 
                                 // Generate a clean, meaningful description for search results
@@ -952,6 +858,100 @@ public class QueryService {
         results.sort((r1, r2) -> Double.compare((double)r2.get("score"), (double)r1.get("score")));
         
         return results;
+    }
+    
+    /**
+     * Special snippet generator specifically for phrase searches
+     * This ensures the exact phrase is highlighted in context
+     */
+    private String generatePhraseSnippet(String content, String phrase) {
+        try {
+            if (content == null || content.isEmpty() || phrase == null || phrase.isEmpty()) {
+                return "No content available";
+            }
+            
+            // Parse HTML content
+            org.jsoup.nodes.Document parsedDoc = org.jsoup.Jsoup.parse(content);
+            String text = parsedDoc.text();
+            
+            // Lowercase for case-insensitive matching
+            String lowerText = text.toLowerCase();
+            String lowerPhrase = phrase.toLowerCase();
+            
+            // Find the position of the phrase in the text
+            int phrasePos = lowerText.indexOf(lowerPhrase);
+            if (phrasePos == -1) {
+                // If phrase not found, fall back to regular snippet
+                return generateSnippet(content, Arrays.asList(phrase.split("\\s+")));
+            }
+            
+            // Find a good context window around the phrase
+            int contextStart = Math.max(0, phrasePos - 100);
+            int contextEnd = Math.min(text.length(), phrasePos + phrase.length() + 100);
+            
+            // Try to start at a word boundary
+            if (contextStart > 0) {
+                while (contextStart > 0 && Character.isLetterOrDigit(text.charAt(contextStart))) {
+                    contextStart--;
+                }
+                // Skip any non-word characters at the beginning
+                while (contextStart < phrasePos && !Character.isLetterOrDigit(text.charAt(contextStart))) {
+                    contextStart++;
+                }
+            }
+            
+            // Try to end at a sentence boundary
+            if (contextEnd < text.length() - 1) {
+                int periodPos = text.indexOf(". ", phrasePos + phrase.length());
+                if (periodPos > 0 && periodPos < contextEnd) {
+                    contextEnd = periodPos + 1;
+                }
+            }
+            
+            // Extract the snippet with context
+            String snippet = text.substring(contextStart, contextEnd);
+            
+            // Add ellipsis if we're not at the beginning/end
+            if (contextStart > 0) {
+                snippet = "..." + snippet;
+            }
+            if (contextEnd < text.length()) {
+                snippet += "...";
+            }
+            
+            // Highlight the phrase in the snippet
+            try {
+                // Create a case-insensitive pattern that finds the phrase
+                Pattern pattern = Pattern.compile(Pattern.quote(phrase), Pattern.CASE_INSENSITIVE);
+                Matcher matcher = pattern.matcher(snippet);
+                
+                StringBuffer sb = new StringBuffer();
+                while (matcher.find()) {
+                    String match = matcher.group();
+                    matcher.appendReplacement(sb, "<strong>" + match + "</strong>");
+                }
+                matcher.appendTail(sb);
+                
+                return sb.toString();
+            } catch (Exception e) {
+                // If regex highlighting fails, use simple string replacement
+                logger.debug("Regex highlight failed, using simple replacement for phrase: {}", phrase);
+                
+                // Find the phrase in our snippet (which may be different from the original text position)
+                int snippetPhrasePos = snippet.toLowerCase().indexOf(lowerPhrase);
+                if (snippetPhrasePos >= 0) {
+                    String exactMatch = snippet.substring(snippetPhrasePos, snippetPhrasePos + phrase.length());
+                    snippet = snippet.substring(0, snippetPhrasePos) + 
+                              "<strong>" + exactMatch + "</strong>" + 
+                              snippet.substring(snippetPhrasePos + phrase.length());
+                }
+                
+                return snippet;
+            }
+        } catch (Exception e) {
+            logger.error("Error generating phrase snippet: {}", e.getMessage());
+            return "Content preview unavailable";
+        }
     }
     
     // Optimized version for better performance
@@ -1134,39 +1134,7 @@ public class QueryService {
         return score;
     }
     
-    /**
-     * Extracts the first meaningful paragraph from text
-     */
-    private String getFirstParagraph(String text) {
-        if (text == null || text.isEmpty()) {
-            return "";
-        }
-        
-        // Split by paragraph breaks and find first non-empty paragraph
-        String[] paragraphs = text.split("\n\n|\r\n\r\n");
-        for (String paragraph : paragraphs) {
-            String trimmed = paragraph.trim();
-            if (trimmed.length() > 50) { // Meaningful paragraph should be at least 50 chars
-                return trimmed;
-            }
-        }
-        
-        // Fall back to the first 200 characters if no good paragraph is found
-        return text.length() > 200 ? text.substring(0, 200) : text;
-    }
-    
-    /**
-     * Count occurrences of a term in text
-     */
-    private int countOccurrences(String text, String term) {
-        int count = 0;
-        int index = 0;
-        while ((index = text.indexOf(term, index)) != -1) {
-            count++;
-            index += term.length();
-        }
-        return count;
-    }
+
     
     private String generateSnippet(String content, List<String> stemmedWords) {
         try {
@@ -1178,35 +1146,40 @@ public class QueryService {
                 return "No content available";
             }
             
-            // Find the best paragraph containing the query words
+            // Create a search phrase from all terms
+            String searchPhrase = String.join(" ", stemmedWords).toLowerCase();
+            boolean isExactPhraseSearch = stemmedWords.size() > 1;
+                
+            // Split text into paragraphs for better context
             String[] paragraphs = text.split("\\. ");
             
             if (paragraphs.length == 0) {
                 return "No content available";
             }
             
-            // Find paragraph with most query term matches
-            int bestMatchCount = 0;
+            // Find paragraph with the exact phrase match
             String bestParagraph = "";
+            boolean foundExactMatch = false;
             
-            // Create a search phrase from all terms
-            String searchPhrase = String.join(" ", stemmedWords).toLowerCase();
-            
-            // First check for exact phrase match
-            for (String paragraph : paragraphs) {
-                if (paragraph != null && paragraph.length() >= 20) {
-                    String lowerParagraph = paragraph.toLowerCase();
-                    if (lowerParagraph.contains(searchPhrase)) {
-                        // Found exact phrase match - prioritize this paragraph
-                        bestParagraph = paragraph;
-                        bestMatchCount = stemmedWords.size() + 1; // Extra bonus to ensure this is picked
-                        break;
+            // First prioritize finding the exact phrase
+            if (isExactPhraseSearch) {
+                for (String paragraph : paragraphs) {
+                    if (paragraph != null && paragraph.length() >= 20) {
+                        String lowerParagraph = paragraph.toLowerCase();
+                        if (lowerParagraph.contains(searchPhrase)) {
+                            bestParagraph = paragraph;
+                            foundExactMatch = true;
+                            logger.debug("Found exact phrase match in snippet: '{}'", searchPhrase);
+                            break;
+                        }
                     }
                 }
             }
             
-            // If no exact phrase match, look for paragraph with most term matches
-            if (bestMatchCount == 0) {
+            // If we didn't find an exact match, look for individual terms
+            if (!foundExactMatch) {
+                int bestMatchCount = 0;
+                
                 for (String paragraph : paragraphs) {
                     if (paragraph != null && paragraph.length() >= 20) {
                         String lowerParagraph = paragraph.toLowerCase();
@@ -1243,33 +1216,71 @@ public class QueryService {
             
             // Trim the paragraph if it's too long
             if (bestParagraph.length() > 300) {
-                bestParagraph = bestParagraph.substring(0, 297) + "...";
+                // Try to find a good breakpoint that doesn't cut in the middle of the phrase
+                int idealEnd = 297;
+                
+                if (foundExactMatch) {
+                    // Find where the phrase is
+                    int phrasePos = bestParagraph.toLowerCase().indexOf(searchPhrase.toLowerCase());
+                    
+                    // If the phrase would be cut, adjust to include the full phrase
+                    if (phrasePos > 0 && phrasePos < idealEnd && phrasePos + searchPhrase.length() > idealEnd) {
+                        // Include the full phrase + a bit more
+                        idealEnd = phrasePos + searchPhrase.length() + 20;
+                        // But don't exceed the paragraph length
+                        idealEnd = Math.min(idealEnd, bestParagraph.length());
+                    }
+                }
+                
+                bestParagraph = bestParagraph.substring(0, Math.min(idealEnd, bestParagraph.length())) + "...";
             }
             
-            // Highlight the query terms in the snippet (bold them)
+            // Highlight the content differently based on whether it's a phrase search
             String snippet = bestParagraph;
-            for (String word : stemmedWords) {
-                if (word != null && !word.isEmpty()) {
-                    try {
-                        // Use case-insensitive replacement with regex, but handle special characters safely
-                        String safeWord = Pattern.quote(word);
-                        String regex = "(?i)\\b" + safeWord + "\\b";
-                        snippet = snippet.replaceAll(regex, "<strong>$0</strong>");
-                    } catch (Exception e) {
-                        // If regex fails, try simple replacement
-                        logger.debug("Regex replacement failed for term {}, using simple replace", word);
-                        String lowerSnippet = snippet.toLowerCase();
-                        String lowerWord = word.toLowerCase();
-                        
-                        int index = lowerSnippet.indexOf(lowerWord);
-                        while (index >= 0) {
-                            String original = snippet.substring(index, index + word.length());
-                            snippet = snippet.substring(0, index) + 
-                                    "<strong>" + original + "</strong>" + 
-                                    snippet.substring(index + word.length());
+            
+            if (isExactPhraseSearch && foundExactMatch) {
+                // For phrase searches, highlight the complete phrase
+                try {
+                    String safePhrase = Pattern.quote(searchPhrase);
+                    String regex = "(?i)" + safePhrase;
+                    snippet = snippet.replaceAll(regex, "<strong>$0</strong>");
+                } catch (Exception e) {
+                    // If regex fails, try simple replacement
+                    logger.debug("Regex replacement failed for phrase {}, using simple replace", searchPhrase);
+                    
+                    int index = snippet.toLowerCase().indexOf(searchPhrase.toLowerCase());
+                    if (index >= 0) {
+                        String original = snippet.substring(index, index + searchPhrase.length());
+                        snippet = snippet.substring(0, index) + 
+                                "<strong>" + original + "</strong>" + 
+                                snippet.substring(index + searchPhrase.length());
+                    }
+                }
+            } else {
+                // For regular searches, highlight each term individually
+                for (String word : stemmedWords) {
+                    if (word != null && !word.isEmpty()) {
+                        try {
+                            // Use case-insensitive replacement with regex, but handle special characters safely
+                            String safeWord = Pattern.quote(word);
+                            String regex = "(?i)\\b" + safeWord + "\\b";
+                            snippet = snippet.replaceAll(regex, "<strong>$0</strong>");
+                        } catch (Exception e) {
+                            // If regex fails, try simple replacement
+                            logger.debug("Regex replacement failed for term {}, using simple replace", word);
+                            String lowerSnippet = snippet.toLowerCase();
+                            String lowerWord = word.toLowerCase();
                             
-                            // Move past this replacement
-                            index = lowerSnippet.indexOf(lowerWord, index + word.length() + 17); // +17 for the added HTML tags
+                            int index = lowerSnippet.indexOf(lowerWord);
+                            while (index >= 0) {
+                                String original = snippet.substring(index, index + word.length());
+                                snippet = snippet.substring(0, index) + 
+                                        "<strong>" + original + "</strong>" + 
+                                        snippet.substring(index + word.length());
+                                
+                                // Move past this replacement
+                                index = lowerSnippet.indexOf(lowerWord, index + word.length() + 17); // +17 for the added HTML tags
+                            }
                         }
                     }
                 }
@@ -1282,64 +1293,6 @@ public class QueryService {
         }
     }
     
-    private double calculateRelevanceScore(Long docId, List<String> stemmedWords) {
-        double score = 0.0;
-        
-        // Get total number of documents for IDF calculation
-        long totalDocs = documentRepository.count();
-        
-        for (String word : stemmedWords) {
-            Optional<Word> wordEntity = wordRepository.findByWord(word);
-            if (wordEntity.isPresent()) {
-                try {
-                    // Calculate TF (term frequency) using direct SQL query
-                    Integer termFreq = jdbcTemplate.queryForObject(
-                        "SELECT frequency FROM inverted_index WHERE word_id = ? AND doc_id = ?",
-                        Integer.class, wordEntity.get().getId(), docId);
-                    
-                    if (termFreq != null) {
-                        // Calculate IDF (inverse document frequency) using direct SQL query
-                        Long docsWithTerm = jdbcTemplate.queryForObject(
-                            "SELECT COUNT(*) FROM inverted_index WHERE word_id = ?",
-                            Long.class, wordEntity.get().getId());
-                        double idf = Math.log10((double)totalDocs / (docsWithTerm + 1));
-                        
-                        // TF-IDF score
-                        double tfIdf = termFreq * idf;
-                        
-                        // Add to total score
-                        score += tfIdf;
-                        
-                        // Boost score for words in important tags (title, h1, etc.)
-                        try {
-                            // Use direct SQL query to get tags for this word and document
-                            List<Map<String, Object>> wordDocTagList = jdbcTemplate.queryForList(
-                                "SELECT * FROM word_document_tags WHERE word_id = ? AND doc_id = ?",
-                                wordEntity.get().getId(), docId
-                            );
-                            
-                            for (Map<String, Object> tagData : wordDocTagList) {
-                                String tag = (String) tagData.get("tag");
-                                if (tag.equals("title")) {
-                                    score += tfIdf * 3;
-                                } else if (tag.equals("h1")) {
-                                    score += tfIdf * 2;
-                                } else if (tag.startsWith("h")) {
-                                    score += tfIdf * 1.5;
-                                }
-                            }
-                        } catch (Exception e) {
-                            logger.debug("Error getting tags for word {} in doc {}", word, docId);
-                        }
-                    }
-                } catch (Exception e) {
-                    logger.debug("Error calculating term frequency for word {} in doc {}", word, docId);
-                }
-            }
-        }
-        
-        return score;
-    }
 
     // Replace Snowball stemmer with Porter stemmer
     private String stemWord(String word) {
@@ -1450,19 +1403,6 @@ public class QueryService {
         return false;
     }
 
-    private String extractDomainFromUrl(String url) {
-        try {
-            java.net.URI uri = new java.net.URI(url);
-            String host = uri.getHost();
-            if (host == null) {
-                return "";
-            }
-            return host.replaceFirst("^www\\.", "").replaceFirst("\\.[^\\.]+$", "");
-        } catch (Exception e) {
-            logger.error("Error extracting domain from URL: {}", e.getMessage());
-            return "";
-        }
-    }
 
     /**
      * Calculate term proximity for terms not appearing as an exact phrase
@@ -1541,32 +1481,6 @@ public class QueryService {
         return proximityScore;
     }
     
-    /**
-     * Get semantic relations for terms (simplified synonym matching)
-     * In a real system, this would use a proper thesaurus or word embedding model
-     */
-    private Map<String, List<String>> getSemanticRelations() {
-        // Simple hardcoded semantic relations - in a real system would use an NLP model
-        Map<String, List<String>> relations = new HashMap<>();
-        
-        // Political terms
-        relations.put("election", Arrays.asList("vote", "ballot", "poll", "voting", "elect", "democratic"));
-        relations.put("vote", Arrays.asList("ballot", "election", "poll", "voting", "elect"));
-        relations.put("politics", Arrays.asList("political", "government", "governance", "policy"));
-        relations.put("president", Arrays.asList("presidential", "administration", "leader", "elect", "head"));
-        
-        // Countries and regions
-        relations.put("egypt", Arrays.asList("egyptian", "cairo", "africa", "north africa", "middle east"));
-        relations.put("us", Arrays.asList("usa", "united states", "america", "american"));
-        relations.put("uk", Arrays.asList("united kingdom", "britain", "british", "london"));
-        
-        // News terms
-        relations.put("news", Arrays.asList("report", "media", "press", "article"));
-        relations.put("war", Arrays.asList("conflict", "battle", "fighting", "combat", "warfare"));
-        relations.put("peace", Arrays.asList("ceasefire", "truce", "agreement", "treaty"));
-        
-        return relations;
-    }
 
     /**
      * Filter out low-quality search results that shouldn't be shown to users
@@ -1795,6 +1709,7 @@ public class QueryService {
      * @return List of search results
      */
     public List<Map<String, Object>> search(String query, int page, int pageSize) {
+        // Get the query result directly (it will be cached by the controller)
         QueryResult result = processQuery(query);
         
         List<Map<String, Object>> allResults = result.getResults();
@@ -1810,7 +1725,7 @@ public class QueryService {
             return new ArrayList<>();
         }
         
-        return formatSearchResults(allResults.subList(fromIndex, toIndex));
+        return allResults.subList(fromIndex, toIndex);
     }
     
     /**
@@ -1819,6 +1734,8 @@ public class QueryService {
      * @return Total number of matching documents
      */
     public int getTotalResultsCount(String query) {
+        // This method will likely be called by the controller after search(),
+        // so we'll keep it simple to let the controller handle caching
         QueryResult result = processQuery(query);
         List<Map<String, Object>> results = result.getResults();
         return results != null ? results.size() : 0;

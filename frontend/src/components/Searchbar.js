@@ -1,7 +1,8 @@
 // components/Searchbar.js
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import styled from 'styled-components';
 import { useNavigate, useLocation } from 'react-router-dom';
+import axios from 'axios';
 
 const SearchContainer = styled.div`
   display: flex;
@@ -85,12 +86,19 @@ const VoiceButton = styled.button`
   width: 50px;
   background: transparent;
   border: none;
-  color: rgba(255, 255, 255, 0.7);
+  color: ${props => props.$isListening ? 'rgba(255, 89, 89, 0.9)' : 'rgba(255, 255, 255, 0.7)'};
   cursor: pointer;
   transition: color 0.2s ease;
+  animation: ${props => props.$isListening ? 'pulse 1.5s infinite' : 'none'};
+  
+  @keyframes pulse {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.1); }
+    100% { transform: scale(1); }
+  }
   
   &:hover {
-    color: rgba(255, 255, 255, 1);
+    color: ${props => props.$isListening ? 'rgba(255, 89, 89, 1)' : 'rgba(255, 255, 255, 1)'};
   }
 `;
 
@@ -106,6 +114,8 @@ const VoiceRecognition = styled.div`
   text-align: center;
   display: ${props => props.$show ? 'block' : 'none'};
   box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+  z-index: 100;
+  backdrop-filter: blur(5px);
   
   p {
     margin: 0;
@@ -119,13 +129,28 @@ const VoiceRecognition = styled.div`
   }
 `;
 
+const PulseDot = styled.div`
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 8px;
+  height: 8px;
+  background-color: #ff5959;
+  border-radius: 50%;
+  animation: pulse 1.5s infinite;
+  display: ${props => props.$isVisible ? 'block' : 'none'};
+`;
+
 const SearchBar = ({ isResults, initialQuery, onSearch }) => {
   const [query, setQuery] = useState(initialQuery || '');
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState('');
+  const recognitionRef = useRef(null);
   const navigate = useNavigate();
   const location = useLocation();
   const isHomePage = location.pathname === '/';
+  const API_BASE_URL = 'http://localhost:8080/api';
   
   // Get query from URL if on results page
   useEffect(() => {
@@ -134,15 +159,43 @@ const SearchBar = ({ isResults, initialQuery, onSearch }) => {
     }
   }, [initialQuery, isHomePage]);
   
-  const handleSearch = (e) => {
+  // Clean up recognition on unmount
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch (e) {
+          // Recognition may already be stopped
+        }
+      }
+    };
+  }, []);
+  
+  const handleSearch = async (e, isVoiceSearch = false) => {
     if (e) e.preventDefault();
     if (query.trim()) {
-      if (onSearch) {
-        // Use the provided onSearch handler if available (for fresh results)
-        onSearch(query);
-      } else {
-        // Default navigation behavior
-        navigate(`/search?q=${encodeURIComponent(query)}`);
+      try {
+        if (isVoiceSearch) {
+          // Use the voice search endpoint
+          await axios.get(`${API_BASE_URL}/voice-search?query=${encodeURIComponent(query)}`);
+        }
+        
+        if (onSearch) {
+          // Use the provided onSearch handler if available (for result page)
+          onSearch(query);
+        } else {
+          // Default navigation behavior for home page
+          navigate(`/search?q=${encodeURIComponent(query)}`);
+        }
+      } catch (error) {
+        console.error('Search error:', error);
+        // If voice search API fails, still perform regular search
+        if (onSearch) {
+          onSearch(query);
+        } else {
+          navigate(`/search?q=${encodeURIComponent(query)}`);
+        }
       }
     }
   };
@@ -156,50 +209,70 @@ const SearchBar = ({ isResults, initialQuery, onSearch }) => {
   
   const toggleVoiceRecognition = () => {
     if (!isListening) {
-      setIsListening(true);
       startVoiceRecognition();
     } else {
-      setIsListening(false);
       stopVoiceRecognition();
     }
   };
   
   const startVoiceRecognition = () => {
-    if ('webkitSpeechRecognition' in window) {
-      const recognition = new window.webkitSpeechRecognition();
-      recognition.continuous = false;
-      recognition.interimResults = true;
+    setIsListening(true);
+    setTranscript('');
+    
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+      // Use the appropriate recognition API
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognitionRef.current = new SpeechRecognition();
       
-      recognition.onresult = (event) => {
+      recognitionRef.current.continuous = false;
+      recognitionRef.current.interimResults = true;
+      recognitionRef.current.lang = 'en-US';
+      
+      recognitionRef.current.onstart = () => {
+        setIsListening(true);
+      };
+      
+      recognitionRef.current.onresult = (event) => {
         const current = event.resultIndex;
         const result = event.results[current][0].transcript;
         setTranscript(result);
       };
       
-      recognition.onend = () => {
+      recognitionRef.current.onerror = (event) => {
+        console.error('Speech recognition error:', event.error);
+        setIsListening(false);
+      };
+      
+      recognitionRef.current.onend = () => {
         if (transcript) {
           setQuery(transcript);
           setIsListening(false);
+          
+          // Short delay to allow user to see what was transcribed
           setTimeout(() => {
-            handleSearch();
+            handleSearch(null, true); // Pass true to indicate voice search
           }, 1000);
         } else {
           setIsListening(false);
         }
       };
       
-      recognition.start();
-      window.recognition = recognition;
+      recognitionRef.current.start();
     } else {
-      alert('Speech recognition is not supported in your browser');
+      alert('Speech recognition is not supported in your browser. Try Chrome or Edge.');
       setIsListening(false);
     }
   };
   
   const stopVoiceRecognition = () => {
-    if (window.recognition) {
-      window.recognition.stop();
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (e) {
+        // Recognition may already be stopped
+      }
     }
+    setIsListening(false);
   };
 
   return (
@@ -207,7 +280,7 @@ const SearchBar = ({ isResults, initialQuery, onSearch }) => {
       <SearchForm as="form" onSubmit={handleSearch}>
         <Input 
           type="text"
-          placeholder={isHomePage ? 'Search... (Try "term1" OR "term2")' : 'Search...'}
+          placeholder={isHomePage ? 'Search... (Use "quotes" for exact phrases, AND/OR/NOT for operators)' : 'Search...'}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           $isHomePage={isHomePage}
@@ -224,16 +297,19 @@ const SearchBar = ({ isResults, initialQuery, onSearch }) => {
         <VoiceButton 
           type="button" 
           onClick={toggleVoiceRecognition}
+          $isListening={isListening}
+          aria-label={isListening ? "Stop voice input" : "Start voice input"}
         >
           🎤
+          <PulseDot $isVisible={isListening} />
         </VoiceButton>
-        <SearchButton type="submit">
+        <SearchButton type="submit" aria-label="Search">
           🔍
         </SearchButton>
       </SearchForm>
       
       <VoiceRecognition $show={isListening}>
-        <p>Say something...</p>
+        <p>Listening... speak now</p>
         {transcript && <h3>{transcript}</h3>}
       </VoiceRecognition>
     </SearchContainer>

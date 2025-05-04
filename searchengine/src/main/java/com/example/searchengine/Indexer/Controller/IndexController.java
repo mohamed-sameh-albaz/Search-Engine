@@ -20,6 +20,7 @@ import java.util.HashMap;
 import org.springframework.data.domain.Page;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.CrossOrigin;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @RestController
 @RequestMapping("/api/indexer")
@@ -76,13 +77,19 @@ public class IndexController {
             } else {
                 // For indexing all documents, we'll process in small batches to avoid memory issues
                 long totalDocuments = documentRepository.count();
-                int batchSize = 50; // Process 50 documents at a time
+                int batchSize = 100; // Increased batch size for better performance
                 long totalBatches = (totalDocuments + batchSize - 1) / batchSize; // Ceiling division
                 
                 response.put("message", "Started reindexing all " + totalDocuments + 
                              " documents in " + totalBatches + " batches. Each batch will process " + 
                              batchSize + " documents.");
                 response.put("status", "success");
+                response.put("totalDocuments", totalDocuments);
+                response.put("totalBatches", totalBatches);
+                
+                // Use an AtomicInteger for thread-safe progress tracking
+                final AtomicInteger processedBatches = new AtomicInteger(0);
+                final AtomicInteger processedDocuments = new AtomicInteger(0);
                 
                 // Start the reindexing process in a separate thread
                 new Thread(() -> {
@@ -90,7 +97,6 @@ public class IndexController {
                         System.out.println("Starting background reindexing of all documents...");
                         int page = 0;
                         boolean hasMore = true;
-                        int processedCount = 0;
                         
                         while (hasMore) {
                             // Process one batch at a time
@@ -111,20 +117,37 @@ public class IndexController {
                             // Index this batch
                             if (!batch.isEmpty()) {
                                 indexService.buildIndex(batch);
-                                processedCount += batch.size();
-                                System.out.println("Indexed batch " + (page+1) + " of " + totalBatches + 
-                                                  " (" + processedCount + "/" + totalDocuments + " documents)");
+                                processedDocuments.addAndGet(batch.size());
+                                int currentBatch = processedBatches.incrementAndGet();
+                                
+                                // Log progress
+                                System.out.println(String.format(
+                                    "Indexed batch %d of %d (%.1f%%) - %d/%d documents processed",
+                                    currentBatch, totalBatches,
+                                    (currentBatch * 100.0 / totalBatches),
+                                    processedDocuments.get(), totalDocuments
+                                ));
                             }
                             
                             page++;
                             
-                            // Give the JVM some time to clean up between batches
+                            // Clear the batch and help GC
                             batch.clear();
                             System.gc();
-                            Thread.sleep(500); // Short pause between batches
+                            
+                            // A small delay between batches to prevent overwhelming the system
+                            try {
+                                Thread.sleep(200);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
                         }
                         
-                        System.out.println("Background reindexing completed: " + processedCount + " documents processed");
+                        // After completing indexing, compute metrics for better search performance
+                        indexService.computeAndStoreMetrics();
+                        
+                        System.out.println("Background reindexing completed: " + processedDocuments.get() + 
+                                           " documents processed. Search metrics computed.");
                     } catch (Exception e) {
                         System.err.println("Error during background reindexing: " + e.getMessage());
                         e.printStackTrace();

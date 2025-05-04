@@ -3,7 +3,6 @@ package com.example.searchengine.controllers;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.ArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
@@ -13,7 +12,6 @@ import org.springframework.context.ApplicationContext;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.example.searchengine.Crawler.Entities.Document;
@@ -40,8 +38,7 @@ public class ReindexController {
     }
 
     @PostMapping("/reindex")
-    public ResponseEntity<Map<String, Object>> reindexDocuments(
-            @RequestParam(value = "batchSize", defaultValue = "50") int batchSize) {
+    public ResponseEntity<Map<String, Object>> reindexDocuments() {
         
         if (indexingInProgress.get()) {
             Map<String, Object> response = new HashMap<>();

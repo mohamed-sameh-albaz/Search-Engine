@@ -5,11 +5,14 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Element;
@@ -28,15 +31,12 @@ import com.example.searchengine.Indexer.Entities.Word;
 import com.example.searchengine.Indexer.Entities.WordDocumentMetrics;
 import com.example.searchengine.Indexer.Entities.WordDocumentTag;
 import com.example.searchengine.Indexer.Entities.WordIdf;
-import com.example.searchengine.Indexer.Entities.WordPosition;
-import com.example.searchengine.Indexer.Service.PreIndexer;
 import com.example.searchengine.Indexer.Repository.InvertedIndexRepository;
 import com.example.searchengine.Indexer.Repository.WordDocumentMetricsRepository;
 import com.example.searchengine.Indexer.Repository.WordDocumentTagRepository;
 import com.example.searchengine.Indexer.Repository.WordIdfRepository;
 import com.example.searchengine.Indexer.Repository.WordRepository;
 import com.example.searchengine.Indexer.Repository.WordPositionRepository;
-import com.example.searchengine.controllers.ReindexController;
 
 @Service
 public class IndexerService {
@@ -50,6 +50,22 @@ public class IndexerService {
     private final WordPositionRepository wordPositionRepository;
     private final JdbcTemplate jdbcTemplate;
     private final PreIndexer preIndexer;
+    
+    // Add word cache to reduce database lookups
+    private final Map<String, Word> wordCache = new java.util.concurrent.ConcurrentHashMap<>();
+
+    // SQL statements for batch operations
+    private static final String WORD_POSITION_INSERT = 
+        "INSERT INTO word_position (word_id, doc_id, position, tag) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING";
+    
+    private static final String WORD_DOCUMENT_TAGS_INSERT =
+        "INSERT INTO word_document_tags (word_id, doc_id, tag, frequency) VALUES (?, ?, ?, ?) " +
+        "ON CONFLICT (word_id, doc_id, tag) DO UPDATE SET frequency = word_document_tags.frequency + EXCLUDED.frequency";
+    
+    private static final String INVERTED_INDEX_INSERT =
+        "INSERT INTO inverted_index (word_id, doc_id, frequency, tf, importance) VALUES (?, ?, ?, ?, ?) " +
+        "ON CONFLICT (word_id, doc_id) DO UPDATE SET frequency = inverted_index.frequency + EXCLUDED.frequency, " +
+        "tf = EXCLUDED.tf, importance = GREATEST(inverted_index.importance, EXCLUDED.importance)";
 
     @Autowired
     public IndexerService(WordRepository wordRepository, DocumentRepository documentRepository,
@@ -85,6 +101,87 @@ public class IndexerService {
         }
     }
 
+    // Method to preload words into cache
+    private void preloadWordCache(Set<String> wordTexts) {
+        if (wordTexts.isEmpty()) return;
+        
+        // Clear current cache to avoid memory issues
+        wordCache.clear();
+        
+        // Split into manageable chunks to avoid huge IN clauses
+        int chunkSize = 500;
+        for (int i = 0; i < wordTexts.size(); i += chunkSize) {
+            List<String> chunk = new ArrayList<>(
+                wordTexts).subList(i, Math.min(i + chunkSize, wordTexts.size()));
+            
+            // Use JDBC for better performance than JPA repository
+            String placeholders = String.join(",", 
+                chunk.stream().map(s -> "?").toArray(String[]::new));
+            
+            String query = "SELECT id, word, total_frequency FROM words WHERE word IN (" + placeholders + ")";
+            
+            jdbcTemplate.query(query, (rs, rowNum) -> {
+                Word word = new Word();
+                word.setId(rs.getLong("id"));
+                word.setWord(rs.getString("word"));
+                word.setTotalFrequency(rs.getLong("total_frequency"));
+                wordCache.put(word.getWord(), word);
+                return word;
+            }, chunk.toArray());
+        }
+    }
+    
+    // Optimized word lookup/creation
+    private Word getOrCreateWord(String wordText) {
+        return wordCache.computeIfAbsent(wordText, text -> {
+            Word word = wordRepository.findByWord(text).orElse(null);
+            if (word == null) {
+                Word newWord = new Word();
+                newWord.setWord(text);
+                newWord.setTotalFrequency(0L);
+                word = wordRepository.save(newWord);
+            }
+            return word;
+        });
+    }
+    
+    // Batch insert word positions
+    private void batchInsertWordPositions(Long wordId, Long docId, Map<String, List<Integer>> tagPositions) {
+        // Prepare batch arguments
+        List<Object[]> batchArgs = new ArrayList<>();
+        
+        for (Map.Entry<String, List<Integer>> entry : tagPositions.entrySet()) {
+            String tag = entry.getKey();
+            List<Integer> positions = entry.getValue();
+            
+            for (Integer position : positions) {
+                batchArgs.add(new Object[]{wordId, docId, position, tag});
+            }
+        }
+        
+        // Execute in batches
+        int batchSize = 500;
+        for (int i = 0; i < batchArgs.size(); i += batchSize) {
+            int endIndex = Math.min(i + batchSize, batchArgs.size());
+            List<Object[]> batch = batchArgs.subList(i, endIndex);
+            
+            jdbcTemplate.batchUpdate(WORD_POSITION_INSERT, batch);
+        }
+    }
+    
+    // Batch insert word document tags
+    private void batchInsertWordDocumentTags(Long wordId, Long docId, Map<String, Integer> tagFrequencies) {
+        List<Object[]> batchArgs = new ArrayList<>();
+        
+        for (Map.Entry<String, Integer> entry : tagFrequencies.entrySet()) {
+            String tag = entry.getKey();
+            int frequency = entry.getValue();
+            batchArgs.add(new Object[]{wordId, docId, tag, frequency});
+        }
+        
+        jdbcTemplate.batchUpdate(WORD_DOCUMENT_TAGS_INSERT, batchArgs);
+    }
+
     private Map<String, WordInfo> extractWordsFromTag(Element element, String tag) {
         Map<String, WordInfo> wordInfo = new HashMap<>();
         String text = element.text();
@@ -92,10 +189,9 @@ public class IndexerService {
         words = preIndexer.removeStopWords(words);
         words = preIndexer.Stemming(words);
         
-        // Track position of each word within the element
         int position = 0;
-        for (String word : words) {
-            WordInfo info = wordInfo.computeIfAbsent(word, k -> new WordInfo());
+        for (String wordTxt : words) {
+            WordInfo info = wordInfo.computeIfAbsent(wordTxt, w -> new WordInfo());
             info.addFrequency(tag, 1);
             info.addPosition(tag, position);
             position++;
@@ -135,7 +231,6 @@ public class IndexerService {
                             "ON CONFLICT (word_id, doc_id) DO UPDATE SET frequency = inverted_index.frequency + ?",
                     word.getId(), documentEntity.getId(), freq, freq);
         }
-
     }
 
     @Transactional(noRollbackFor = DataIntegrityViolationException.class)
@@ -143,6 +238,12 @@ public class IndexerService {
         System.out.println("Indexing page: " + url);
         org.jsoup.nodes.Document doc = Jsoup.parse(html); // parse the html
         Document documentEntity = documentRepository.findByUrl(url).orElse(null); // check for existence
+        
+        if (documentEntity == null) {
+            System.err.println("Document not found in database: " + url);
+            return;
+        }
+        
         Map<String, WordInfo> pageWordInfo = new HashMap<>(); // store the page info
         
         // Get the total word count in the document for TF calculation
@@ -151,6 +252,12 @@ public class IndexerService {
         allWords = preIndexer.removeStopWords(allWords);
         allWords = preIndexer.Stemming(allWords);
         int totalWordCount = allWords.size();
+
+        // Extract unique words for preloading
+        Set<String> uniqueWords = new HashSet<>(allWords);
+
+        // Preload existing words into cache
+        preloadWordCache(uniqueWords);
 
         // Map to assign importance values to different HTML tags
         Map<String, Integer> tagImportance = new HashMap<>();
@@ -164,47 +271,45 @@ public class IndexerService {
         List<String> tagsToIndex = new ArrayList<>(Arrays.asList("p", "h1", "h2", "h3"));
         tagsToIndex.add("title");
 
-        // Process each tag in the document
+        // More efficient selection - group by tag type
         for (String tag : tagsToIndex) {
-            for (org.jsoup.nodes.Element element : doc.select(tag)) { // for each element in the html document
+            for (org.jsoup.nodes.Element element : doc.select(tag)) {
                 Map<String, WordInfo> wordInfoMap = extractWordsFromTag(element, tag);
-                for (Map.Entry<String, WordInfo> entry : wordInfoMap.entrySet()) { // for each word in the tag
+                for (Map.Entry<String, WordInfo> entry : wordInfoMap.entrySet()) {
                     String wordText = entry.getKey();
                     WordInfo tagInfo = entry.getValue();
                     WordInfo pageInfo = pageWordInfo.computeIfAbsent(wordText, k -> new WordInfo());
+                    
+                    // Merge tag frequencies
                     for (Map.Entry<String, Integer> tagEntry : tagInfo.tagFrequencies.entrySet()) {
-                        pageInfo.tagFrequencies.put(tagEntry.getKey(),
-                                pageInfo.tagFrequencies.getOrDefault(tagEntry.getKey(), 0)
-                                        + tagEntry.getValue());
+                        pageInfo.tagFrequencies.put(
+                            tagEntry.getKey(),
+                            pageInfo.tagFrequencies.getOrDefault(tagEntry.getKey(), 0) + tagEntry.getValue()
+                        );
                     }
-                    // Copy position information
+                    
+                    // Merge position information
                     for (Map.Entry<String, List<Integer>> posEntry : tagInfo.tagPositions.entrySet()) {
                         String posTag = posEntry.getKey();
                         List<Integer> positions = posEntry.getValue();
-                        if (!pageInfo.tagPositions.containsKey(posTag)) {
-                            pageInfo.tagPositions.put(posTag, new ArrayList<>());
-                        }
-                        pageInfo.tagPositions.get(posTag).addAll(positions);
+                        pageInfo.tagPositions.computeIfAbsent(posTag, k -> new ArrayList<>()).addAll(positions);
                     }
+                    
                     pageInfo.totalFrequency += tagInfo.totalFrequency;
                 }
             }
         }
 
-        for (Map.Entry<String, WordInfo> entry : pageWordInfo.entrySet()) { // for each word collected
+        // Prepare batch updates for all words at once
+        List<Object[]> wordFrequencyUpdates = new ArrayList<>();
+        List<Object[]> invertedIndexInserts = new ArrayList<>();
+        
+        for (Map.Entry<String, WordInfo> entry : pageWordInfo.entrySet()) {
             String wordText = entry.getKey();
             WordInfo info = entry.getValue();
 
-            Word word = wordRepository.findByWord(wordText)
-                    .orElseGet(() -> {
-                        Word newWord = new Word();
-                        newWord.setWord(wordText);
-                        newWord.setTotalFrequency(0L);
-                        System.out.println("created new word");
-                        Word now = wordRepository.save(newWord);
-                        wordRepository.flush();
-                        return now;
-                    });
+            // Get or create word from cache
+            Word word = getOrCreateWord(wordText);
             
             try {
                 // Calculate TF = frequency in document / total words in document
@@ -219,46 +324,38 @@ public class IndexerService {
                     }
                 }
                 
-                // Update word total frequency
-                jdbcTemplate.update(
-                    "UPDATE words SET total_frequency = total_frequency + ? WHERE id = ?",
-                    info.totalFrequency, word.getId());
-
-                // Insert into inverted_index with TF and importance values
-                jdbcTemplate.update(
-                        "INSERT INTO inverted_index (word_id, doc_id, frequency, tf, importance) VALUES (?, ?, ?, ?, ?) " +
-                        "ON CONFLICT (word_id, doc_id) DO UPDATE SET frequency = inverted_index.frequency + EXCLUDED.frequency, " +
-                        "tf = EXCLUDED.tf, importance = GREATEST(inverted_index.importance, EXCLUDED.importance)",
-                    word.getId(), documentEntity.getId(), info.totalFrequency, tf, importance);
-
-                // Process each tag
-                for (Map.Entry<String, Integer> tagEntry : info.tagFrequencies.entrySet()) {
-                    String tag = tagEntry.getKey();
-                    int tagFrequency = tagEntry.getValue();
-
-                    // Insert into word_document_tags with ON CONFLICT DO UPDATE
-                    jdbcTemplate.update(
-                            "INSERT INTO word_document_tags (word_id, doc_id, tag, frequency) VALUES (?, ?, ?, ?) " +
-                            "ON CONFLICT (word_id, doc_id, tag) DO UPDATE SET frequency = word_document_tags.frequency + EXCLUDED.frequency",
-                        word.getId(), documentEntity.getId(), tag, tagFrequency);
-                }
+                // Add to batch updates
+                wordFrequencyUpdates.add(new Object[]{info.totalFrequency, word.getId()});
+                invertedIndexInserts.add(new Object[]{
+                    word.getId(), documentEntity.getId(), info.totalFrequency, tf, importance
+                });
                 
-                // Store word positions
-                for (Map.Entry<String, List<Integer>> posEntry : info.tagPositions.entrySet()) {
-                    String tag = posEntry.getKey();
-                    List<Integer> positions = posEntry.getValue();
-                    
-                    for (Integer position : positions) {
-                        // Use batch insert for better performance with many positions
-                        jdbcTemplate.update(
-                                "INSERT INTO word_position (word_id, doc_id, position, tag) VALUES (?, ?, ?, ?) " +
-                                "ON CONFLICT DO NOTHING",
-                            word.getId(), documentEntity.getId(), position, tag);
-                    }
-                }
+                // Batch insert word document tags
+                batchInsertWordDocumentTags(word.getId(), documentEntity.getId(), info.tagFrequencies);
+                
+                // Batch insert word positions
+                batchInsertWordPositions(word.getId(), documentEntity.getId(), info.tagPositions);
+                
             } catch (Exception e) {
                 // Log error but continue processing other words
                 System.err.println("Error indexing word " + wordText + " in document " + url + ": " + e.getMessage());
+            }
+        }
+        
+        // Execute batch updates
+        if (!wordFrequencyUpdates.isEmpty()) {
+            jdbcTemplate.batchUpdate(
+                "UPDATE words SET total_frequency = total_frequency + ? WHERE id = ?",
+                wordFrequencyUpdates
+            );
+        }
+        
+        if (!invertedIndexInserts.isEmpty()) {
+            int batchSize = 500;
+            for (int i = 0; i < invertedIndexInserts.size(); i += batchSize) {
+                int endIndex = Math.min(i + batchSize, invertedIndexInserts.size());
+                List<Object[]> batch = invertedIndexInserts.subList(i, endIndex);
+                jdbcTemplate.batchUpdate(INVERTED_INDEX_INSERT, batch);
             }
         }
         
@@ -280,6 +377,7 @@ public class IndexerService {
         
         // Clear any existing caches
         CacheHelper.clearInvertedIndexCache();
+        wordCache.clear();
         
         final int BATCH_SIZE = 20; // Process 20 documents per batch
         final int NUM_THREADS = Math.min(Runtime.getRuntime().availableProcessors(), 8); // Use available processors but cap at 8
@@ -728,26 +826,39 @@ public class IndexerService {
     // (doc_id, #words)
     public Map<Long, Long> getDocumentCnt() {
         Map<Long, Long> docCnt = new HashMap<>();
-        int pageSize = 200;
+        int pageSize = 500; // Increased batch size for better performance
         int page = 0;
         boolean hasMore = true;
+        
         while (hasMore) {
             List<Document> docs = documentRepository.findAll(PageRequest.of(page, pageSize)).getContent();
             if (docs.isEmpty()) {
                 hasMore = false;
                 continue;
             }
-            for (Document doc : docs) {
-                Long size = 0L;
-                String cleanedHTML = preIndexer.cleanHTML(doc.getContent());
-                List<String> words = preIndexer.tokenize(cleanedHTML);
-                words = preIndexer.removeStopWords(words);
-                words = preIndexer.Stemming(words);
-                size = (long) words.size();
-                docCnt.put(doc.getId(), size);
-            }
+            
+            // Process the batch in parallel for better performance
+            Map<Long, Long> batchCounts = docs.parallelStream()
+                .collect(Collectors.toMap(
+                    Document::getId,
+                    doc -> {
+                        String cleanedHTML = preIndexer.cleanHTML(doc.getContent());
+                        List<String> words = preIndexer.tokenize(cleanedHTML);
+                        words = preIndexer.removeStopWords(words);
+                        words = preIndexer.Stemming(words);
+                        return (long) words.size();
+                    }
+                ));
+            
+            // Add batch results to the overall map
+            docCnt.putAll(batchCounts);
+            
             page++;
+            
+            // Help GC between batches
+            System.gc();
         }
+        
         return docCnt;
     }
 

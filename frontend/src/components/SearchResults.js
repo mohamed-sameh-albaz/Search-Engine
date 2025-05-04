@@ -269,14 +269,38 @@ const RankingInfoTooltip = styled.div`
   }
 `;
 
+const PhraseQueryIndicator = styled.span`
+  background-color: rgba(155, 89, 182, 0.2);
+  color: #8e44ad;
+  font-weight: bold;
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin: 0 8px;
+  font-size: 0.9rem;
+`;
+
 const highlightText = (text, keywords) => {
-  if (!keywords || !keywords.length) return text;
+  if (!text || !keywords || !keywords.length) return "No description available";
   
-  let highlightedText = text;
+  // Clean up any HTML tags for safety
+  const cleanText = text.replace(/<\/?[^>]+(>|$)/g, "");
   
+  // If the text is very short, return it without additional processing
+  if (cleanText.length < 20) return cleanText;
+  
+  let highlightedText = cleanText;
+  
+  // Highlight each keyword
   keywords.forEach(keyword => {
-    const regex = new RegExp(`(${keyword})`, 'gi');
-    highlightedText = highlightedText.replace(regex, '<span class="highlight">$1</span>');
+    if (keyword && keyword.length > 1) {
+      try {
+        const regex = new RegExp(`(${keyword})`, 'gi');
+        highlightedText = highlightedText.replace(regex, '<span class="highlight">$1</span>');
+      } catch (e) {
+        // If regex fails, continue with the next keyword
+        console.error("Regex error:", e);
+      }
+    }
   });
   
   return <span dangerouslySetInnerHTML={{ __html: highlightedText }} />;
@@ -309,6 +333,8 @@ const SearchResults = () => {
   const query = queryParams.get('q') || '';
   const page = parseInt(queryParams.get('page')) || 1;
   const searchSessionId = queryParams.get('sid') || null;
+
+  const [isPhraseQuery, setIsPhraseQuery] = useState(false);
 
   useEffect(() => {
     if (!query) {
@@ -349,28 +375,26 @@ const SearchResults = () => {
       axios.defaults.headers.common['Accept'] = 'application/json';
       axios.defaults.headers.common['Content-Type'] = 'application/json';
       
-      // Fetch processed query information
+      // First fetch the processed query
       console.log('Fetching processed query for:', query);
-      let processedQueryData = { phrases: [], stemmedWords: [], operator: null };
-      
+      let processedQueryResponse;
       try {
-        const processQueryResponse = await axios.get(`${API_BASE_URL}/process-query?query=${encodeURIComponent(query)}`);
-        processedQueryData = processQueryResponse.data;
-        console.log('Processed query data:', processedQueryData);
+        processedQueryResponse = await axios.get(`${API_BASE_URL}/process-query?query=${encodeURIComponent(query)}`);
+        console.log('Processed query data:', processedQueryResponse.data);
       } catch (err) {
-        console.error('Error processing query:', err);
-        // Continue with empty data
+        // If process-query endpoint fails, continue with regular search
+        console.warn('Error fetching processed query, continuing with regular search:', err);
       }
       
       setProcessedQuery({
-        phrases: processedQueryData.phrases || [],
-        stemmed: processedQueryData.stemmedWords || []
+        phrases: processedQueryResponse?.data.phrases || [],
+        stemmed: processedQueryResponse?.data.stemmedWords || []
       });
-      setOperator(processedQueryData.operator || null);
+      setOperator(processedQueryResponse?.data.operator || null);
       
       // Fetch search results with session ID for consistent pagination
       console.log('Fetching search results for:', query);
-      const searchUrl = `${API_BASE_URL}/query-search?query=${encodeURIComponent(query)}&page=${page}&pageSize=${resultsPerPage}`;
+      const searchUrl = `${API_BASE_URL}/search?query=${encodeURIComponent(query)}&page=${page}&pageSize=${resultsPerPage}`;
       const urlWithSession = currentSessionId ? `${searchUrl}&sessionId=${currentSessionId}` : searchUrl;
       
       const searchResponse = await axios.get(urlWithSession);
@@ -383,6 +407,7 @@ const SearchResults = () => {
       // Set standard results
       setResults(searchResponse.data.results || []);
       setTotalResults(searchResponse.data.totalResults || 0);
+      setIsPhraseQuery(searchResponse.data.isPhraseQuery || false);
       
       // Store the session ID for future pagination
       const newSessionId = searchResponse.data.sessionId;
@@ -577,6 +602,7 @@ const SearchResults = () => {
             {operator && (
               <> using {getOperatorDisplay()} operation</>
             )} 
+            {isPhraseQuery && <PhraseQueryIndicator>Exact phrase search</PhraseQueryIndicator>}
             for "{query}" {renderResultRankingInfo()}
           </SearchInfo>
         )}
@@ -610,7 +636,7 @@ const SearchResults = () => {
                     🔗 {result.url}
                   </ResultUrl>
                   <ResultSnippet>
-                    {highlightText(result.snippet || 'No description available', keywords)}
+                    {highlightText(result.snippet || result.description || 'No description available', keywords)}
                   </ResultSnippet>
                 </ResultItem>
               ))}
