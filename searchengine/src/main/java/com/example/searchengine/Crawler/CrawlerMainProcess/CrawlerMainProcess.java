@@ -39,23 +39,24 @@ import lombok.AllArgsConstructor;
 @AllArgsConstructor
 @RequestMapping("/crawler")
 public class CrawlerMainProcess {
-    private DocumentsRepository documentsRepository;
-    private RelatedLinksRepository relatedLinksRepository;
-    ServeDataBase serveDataBase = new ServeDataBase(documentsRepository, relatedLinksRepository);
-    static AtomicInteger count = new AtomicInteger(0);
-    private static final int MAX_DOCUMENTS = 6000; // Configurable limit
-    private static boolean stopFlag = false;
+    //////////////////////////////////////////////////////////////////////////////////////////
+    private DocumentsRepository documentsRepository;//to store documents in database (url , title, content<whole_html_file)
+    private RelatedLinksRepository relatedLinksRepository;//to store the parent document and all of its childs
+    ServeDataBase serveDataBase = new ServeDataBase(documentsRepository, relatedLinksRepository);//this is for the different function used in database to make data operations
+    static AtomicInteger count = new AtomicInteger(0);//counter to end the program when reaches the MAX_DOCUMENTS it must be atomic to ignore the effect of multi-threading
+    private static final int MAX_DOCUMENTS = 6000; //a constant that refers to the maximum number of documents to be stored in database
+    private static boolean stopFlag = false;//to stop all threads
     private static boolean isRunning = false;
-    private static final String USER_AGENT = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
-    private Set<String> robotChecked = Collections.synchronizedSet(new HashSet<>());
-    private Set<String> excludedLinks = Collections.synchronizedSet(new HashSet<>());
+    private static final String USER_AGENT = "MyCrawler/1.0";
+    private Set<String> robotChecked = Collections.synchronizedSet(new HashSet<>());//a Set to put the robots checked urls
+    private Set<String> excludedLinks = Collections.synchronizedSet(new HashSet<>());//a set to put the excluded links that prevented due robots
     Thread[] threads;
     private static long startTime = 0;
     private Map<Long, Map<Long, Integer>> cachedRelationMap = null;
-    private int[][] cachedRelationMatrix = null;
-
+    private int[][] cachedRelationMatrix = null;//relation matrix of the parent and child docs
+    //////////////////////////////////////////////////////////////////////////////////////////
     @GetMapping("/status")
-    public Map<String, Object> getStatus() {
+    public Map<String, Object> getStatus() { // this is for the status of the crawler
         Map<String, Object> status = new HashMap<>();
         int totalDocuments = serveDataBase.getAllVisited().size();
         
@@ -71,8 +72,8 @@ public class CrawlerMainProcess {
         
         return status;
     }
-    
-    private int getActiveThreadCount() {
+    //////////////////////////////////////////////////////////////////////////////////////
+    private int getActiveThreadCount() {// this to help to get the current thread running just for testing
         if (threads == null) return 0;
         
         int active = 0;
@@ -84,99 +85,40 @@ public class CrawlerMainProcess {
         return active;
     }
 
-    @GetMapping
-    public Map<String, Object> startCrawlingGet(@RequestParam(required = true, defaultValue = "4") int thread_num) {
-        Map<String, Object> response = new HashMap<>();
-        
-        if (isRunning) {
-            response.put("status", "Crawler is already running");
-            response.put("activeThreads", getActiveThreadCount());
-            return response;
-        }
-        
-        count.set(0);
-        stopFlag = false;
-        isRunning = true;
-        startTime = System.currentTimeMillis();
-        
-        int initialCount = serveDataBase.getAllVisited().size();
-        response.put("initialDocumentCount", initialCount);
-        
-        threads = new Thread[thread_num];
-        for (int i = 0; i < thread_num; i++) {
-            final int threadId = i;
-            threads[i] = new Thread(() -> {
-                try {
-                    crawl();
-                } catch (Exception e) {
-                    System.err.println("Error in crawler thread " + threadId + ": " + e.getMessage());
-                    e.printStackTrace();
-                } finally {
-                    if (getActiveThreadCount() == 0) {
-                        isRunning = false;
-                    }
-                }
-            });
-            threads[i].setDaemon(true);
-            threads[i].start();
-        }
-        
-        response.put("status", "Crawler started with " + thread_num + " threads");
-        response.put("message", "Crawling in progress. Check your database for new documents.");
-        
-        return response;
-    }
 
     @PostMapping
     public Map<String, Object> startCrawling(@RequestParam(required = true, defaultValue = "4") int thread_num) {
         Map<String, Object> response = new HashMap<>();
         
-        if (isRunning) {
+        if (isRunning) {// the response of the server to the client to tell him the some values
             response.put("status", "Crawler is already running");
             response.put("activeThreads", getActiveThreadCount());
             return response;
         }
         
         // Validate seed links before starting crawler
-        String[] seedLinks = ReadseedLinks();
-        if (seedLinks == null || seedLinks.length == 0) {
+        String[] seedLinks = ReadseedLinks();//reads the seed links from a file 
+        if (seedLinks == null || seedLinks.length == 0) {//send the response to the client whe error happens
             response.put("status", "error");
             response.put("message", "No seed links available. Check seedlinks.txt file.");
             return response;
         }
         
-        // Test first seed link to ensure connectivity
-        try {
-            String testUrl = seedLinks[0];
-            Connection.Response testResponse = Jsoup.connect(testUrl)
-                .userAgent(USER_AGENT)
-                .header("Accept-Language", "*")
-                .timeout(5000)
-                .method(Connection.Method.HEAD)
-                .execute();
-                
-            response.put("testConnection", "Successful - " + testUrl + " returned status " + testResponse.statusCode());
-        } catch (Exception e) {
-            response.put("status", "warning");
-            response.put("testConnection", "Failed - " + e.getMessage());
-            // Continue anyway, as other seeds might work
-        }
         
         // Clear state for fresh crawl (optional, remove if you want to resume)
-        stopFlag = false;
+        stopFlag = false;// start the stop flag which stops all the program when it finishes
         isRunning = true;
-        startTime = System.currentTimeMillis();
-        count.set(0);
+        startTime = System.currentTimeMillis();//to know when it ends
         
         int initialCount = serveDataBase.getAllVisited().size();
         response.put("initialDocumentCount", initialCount);
         response.put("seedLinksCount", seedLinks.length);
-        
+        count.set(initialCount);//set the count by the initial vlaue in dataBase
         // Configure and start crawler threads
         threads = new Thread[thread_num];
         for (int i = 0; i < thread_num; i++) {
             final int threadId = i;
-            threads[i] = new Thread(() -> {
+            threads[i] = new Thread(() -> { // run the crawl funciton for many threads
             try {
                     crawl();
                 } catch (Exception e) {
@@ -188,7 +130,7 @@ public class CrawlerMainProcess {
                     }
             }
             });
-            threads[i].setDaemon(true);
+            threads[i].setDaemon(true);//interrupts the whole threads when the program ends
             threads[i].start();
         }
 
@@ -197,8 +139,10 @@ public class CrawlerMainProcess {
         
         return response;
     }
-
-    public String[] ReadseedLinks() {
+    //////////////////////////////////////////////////////////////////////////////////////////
+    //////////////////////////////////////////////////////////////////////////////////////////
+    //////////////////////////////////////////////////////////////////////////////////////////
+    public String[] ReadseedLinks() { //reads the links from seed.txt file we will use the programming field 
         try {
             File file = new File("seedlinks.txt");
             BufferedReader Reader = new BufferedReader(new FileReader(file));
@@ -221,17 +165,17 @@ public class CrawlerMainProcess {
         } catch (Exception e) {
             System.out.println("Error reading seed links: " + e.getMessage());
             e.printStackTrace();
-            return new String[] {
-                "https://en.wikipedia.org",
-                "https://www.bbc.com"
+            return new String[] {//if any exception happens just read this values
+                "https://www.geeksforgeeks.org",
+                    "https://github.com"
             };
         }
     }
-
+////////////////////////////////////////////////////////////////////////////////////////////////////////
     public void checkRobotsTxt(String baseUrl) {
         try {
             URL realUrl = new URL(baseUrl);
-            String robotUrl = realUrl.getProtocol() + "://" + realUrl.getHost() + "/robots.txt";
+            String robotUrl = realUrl.getProtocol() + "://" + realUrl.getHost() + "/robots.txt";//fetch the robot url link
             
             synchronized (this.robotChecked) {
                 if (robotChecked.contains(robotUrl))
@@ -240,34 +184,33 @@ public class CrawlerMainProcess {
                 robotChecked.add(robotUrl);
             }
 
-            Connection.Response response = Jsoup.connect(robotUrl)
+            Connection.Response response = Jsoup.connect(robotUrl)//connect to the robot link for every site
                     .userAgent(USER_AGENT)
-                    .header("Accept-Language", "*")
                     .execute();
                     
-            if (response.statusCode() > 399) {
+            if (response.statusCode() > 399) {// no robot rules for this site 
                 return;
             }
             
-            String robotsTxt = response.parse().text();
+            String robotsTxt = response.parse().text();//get a plain text for robot --robot.txt--
             String[] lines = robotsTxt.split(" ");
             boolean toExclude = false;
             
             for (int i = 0; i < lines.length; i++) {
-                if (lines[i].compareTo("User-agent:") == 0 && lines[i + 1].compareTo("*") == 0) {
+                if (lines[i].compareTo("User-agent:") == 0 && lines[i + 1].compareTo("*") == 0) {//allowed for all user agents
                     toExclude = true;
-                } else if (lines[i].compareTo("User-agent:") == 0 && lines[i + 1].compareTo("*") != 0) {
+                } else if (lines[i].compareTo("User-agent:") == 0 && lines[i + 1].compareTo("*") != 0) {//not allowed if the previous word is Disallow
                     toExclude = false;
                 }
                 if (toExclude && lines[i - 1].compareTo("Disallow:") == 0) {
                     String disallowedPath;
-                    if (lines[i].startsWith("/")) {
+                    if (lines[i].startsWith("/")) {//calculate the final path
                         disallowedPath = realUrl.getProtocol() + "://" + realUrl.getHost() + lines[i];
                     } else {
                         disallowedPath = realUrl.getProtocol() + "://" + realUrl.getHost() + '/' + lines[i];
                     }
                     synchronized (this.excludedLinks) {
-                        excludedLinks.add(disallowedPath);
+                        excludedLinks.add(disallowedPath);//add to the set of excluded paths
                     }
                 }
             }
@@ -275,88 +218,78 @@ public class CrawlerMainProcess {
             // Silently ignore errors with robots.txt
         }
     }
-
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     public boolean isAllowedByRobots(String url) {
         try {
             URL urlObj = new URL(url);
-            String baseUrl = urlObj.getProtocol() + "://" + urlObj.getHost();
+            String baseUrl = urlObj.getProtocol() + "://" + urlObj.getHost();//get the base url 
             
             if (!robotChecked.contains(baseUrl + "/robots.txt")) {
-                checkRobotsTxt(baseUrl);
+                checkRobotsTxt(baseUrl);//check for robot if doesn't checked before
             }
             
-            for (String disallowed : excludedLinks) {
+            for (String disallowed : excludedLinks) {//check if the link included un excludedLinks to disallow it
                 if (url.startsWith(disallowed)) {
                     return false;
                 }
             }
-            return true;
+            return true;//allowed
         } catch (Exception e) {
             return true; // Allow if there's an error
         }
     }
-
-    public void crawl() {
-        String[] urlFromSeed = ReadseedLinks();
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    public void crawl() {//the crawl process
+        String[] urlFromSeed = ReadseedLinks();//read all links from the seed
         int seedLinksCount = urlFromSeed.length;
-        BlockingQueue<com.example.searchengine.Crawler.Entities.Document> queue = new LinkedBlockingQueue<>();
-        ConcurrentHashMap<String, com.example.searchengine.Crawler.Entities.Document> visitedUrls = new ConcurrentHashMap<>();
-        List<com.example.searchengine.Crawler.Entities.Document> crawlers = new ArrayList<>();
-
-        // First load existing documents from the database
+        BlockingQueue<com.example.searchengine.Crawler.Entities.Document> queue = new LinkedBlockingQueue<>();//a blocked queue to run a BFS like algorithm and to prevent race conditions
+        ConcurrentHashMap<String, com.example.searchengine.Crawler.Entities.Document> visitedUrls = new ConcurrentHashMap<>();//a hash map to put the visited links
+        List<com.example.searchengine.Crawler.Entities.Document> crawlers = new ArrayList<>();// to get the visited links in data base to continue over them
         try {
-            crawlers = serveDataBase.getAllVisited();
+            crawlers = serveDataBase.getAllVisited();//get all in data base
             System.out.println("Loaded " + crawlers.size() + " existing documents from database");
             
-            // Add existing documents to our tracking maps
-            for (com.example.searchengine.Crawler.Entities.Document doc : crawlers) {
+            for (com.example.searchengine.Crawler.Entities.Document doc : crawlers) {//fetch the documents from data base and put them to our containers
                 if (doc.getUrl() != null) {
                 visitedUrls.put(doc.getUrl(), doc);
+                queue.add(doc);
                 }
             }
         } catch (Exception e) {
             System.err.println("Error loading existing documents: " + e.getMessage());
         }
 
-        // Process each seed URL separately to ensure they get crawled
-        for (int i = 0; i < seedLinksCount && !Thread.currentThread().isInterrupted() && !stopFlag; i++) {
-            String seedUrl = urlFromSeed[i];
+        for (int i = 0; i < seedLinksCount && !Thread.currentThread().isInterrupted() && !stopFlag; i++) {//run over all seed links
+            String seedUrl = urlFromSeed[i];// read the first seed 
             System.out.println("Thread " + Thread.currentThread().getId() + " processing seed URL: " + seedUrl);
             
-            // Skip seed URL if we've already crawled it
-            if (visitedUrls.containsKey(seedUrl)) {
+            if (visitedUrls.containsKey(seedUrl)) {//skip the visited url too avoid links repeat
                 System.out.println("Seed URL already visited: " + seedUrl);
                 continue;
             }
             
-            // Create a new document for this seed
-            com.example.searchengine.Crawler.Entities.Document seedDoc = null;
+            com.example.searchengine.Crawler.Entities.Document seedDoc = null;//create doc for seed
             try {
-                // Check robots.txt for the seed URL's domain
-                checkRobotsTxt(seedUrl);
+                checkRobotsTxt(seedUrl);//check for robots limits
                 
                 if (!isAllowedByRobots(seedUrl)) {
                     System.out.println("Seed URL not allowed by robots.txt: " + seedUrl);
                     continue;
                 }
                 
-                // Normalize the URL
-                String normalizedUrl = normalizeURL(seedUrl);
+                String normalizedUrl = normalizeURL(seedUrl);//normalize url to avoid = links
                 if (normalizedUrl == null) {
                     System.out.println("Failed to normalize seed URL: " + seedUrl);
                     continue;
                 }
                 
-                // Create a document for this seed
                 seedDoc = new com.example.searchengine.Crawler.Entities.Document();
                 seedDoc.setUrl(normalizedUrl);
                 
                 // Try to fetch the content for the seed URL
-                try {
+                try {//set the parameters for the document
                     Document jsoupDoc = Jsoup.connect(normalizedUrl)
                         .userAgent(USER_AGENT)
-                        .header("Accept-Language", "*")
-                        .timeout(10000) // Use a longer timeout for seed URLs
                         .get();
                     
                     String title = jsoupDoc.title();
@@ -366,19 +299,13 @@ public class CrawlerMainProcess {
                     seedDoc.setContent(content);
                     seedDoc.setStatus("visited");
                     
-                    // Save the seed document to the database
-                    serveDataBase.saveToDatabase(seedDoc);
+                    serveDataBase.saveToDatabase(seedDoc);//add it to the data base and visited urls to avoid visit it again
                     int newCount = count.incrementAndGet();
                     System.out.println("Added seed URL to database: " + normalizedUrl + ", count: " + newCount);
-                    
-                    // Add to visited URLs to prevent re-crawling
-                    visitedUrls.put(normalizedUrl, seedDoc);
-                    
-                    // Add all links from this seed URL to the queue
-                    processLinksFromPage(jsoupDoc, normalizedUrl, seedDoc, queue, visitedUrls);
-                    
-                    // Process the queue until it's empty or we reach the maximum number of documents
-                    processQueue(queue, visitedUrls);
+                    visitedUrls.put(normalizedUrl, seedDoc);    
+                    processLinksFromPage(jsoupDoc, normalizedUrl, seedDoc, queue, visitedUrls);// this is for serving all links that is under my link
+                    //the initial call to serve the seed links
+                    processQueue(queue, visitedUrls);//process queue to get the top url and add it to data base and recall the processLinksFromPage to repeat the operation to achieve recursive concept
                 } catch (Exception e) {
                     System.err.println("Error fetching seed URL " + normalizedUrl + ": " + e.getMessage());
                 }
@@ -388,15 +315,17 @@ public class CrawlerMainProcess {
         }
         System.out.println("Thread " + Thread.currentThread().getId() + " finished crawling");
     }
-
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     private void processLinksFromPage(Document doc, String parentUrl, com.example.searchengine.Crawler.Entities.Document parentDoc, 
                                     BlockingQueue<com.example.searchengine.Crawler.Entities.Document> queue,
                                     ConcurrentHashMap<String, com.example.searchengine.Crawler.Entities.Document> visitedUrls) {
         try {
-            URI parentUri = new URI(parentUrl);
-            Elements links = doc.getElementsByTag("a");
+            URI parentUri = new URI(parentUrl);//this is the parent
+            Elements links = doc.getElementsByTag("a");// get all links in the document using jsoup
             
-            for (Element link : links) {
+            for (Element link : links) {//fetch all links and add them to my data structures and data base
                 if (count.get() >= MAX_DOCUMENTS || Thread.currentThread().isInterrupted() || stopFlag) {
                     return;
                 }
@@ -408,8 +337,8 @@ public class CrawlerMainProcess {
                 
                 try {
                     URI resolvedUri = new URI(linkUrl);
-                    resolvedUri = parentUri.resolve(resolvedUri);
-                    String finalUrl = normalizeURL(resolvedUri.toString());
+                    resolvedUri = parentUri.resolve(resolvedUri);//resolve the url to my parent
+                    String finalUrl = normalizeURL(resolvedUri.toString());//normalize url to prevent the repeat urls
                     
                     if (finalUrl == null) {
                         continue;
@@ -417,14 +346,14 @@ public class CrawlerMainProcess {
                     
                     // Save the relationship between parent and child
                         try {
-                            serveDataBase.saveRelatedLinks(parentUrl.toString(), finalUrl);
+                            serveDataBase.saveRelatedLinks(parentUrl.toString(), finalUrl);//save related links (will be used in ranker)
                         } catch (Exception e) {
                         // Just log and continue
                             System.out.println("Error saving related links: " + e.getMessage());
                         }
 
                     // Add to queue if not visited
-                    if (!visitedUrls.containsKey(finalUrl) && isAllowedByRobots(finalUrl)) {
+                    if (!visitedUrls.containsKey(finalUrl) && isAllowedByRobots(finalUrl)) {// put the unvisisted urls to data base and data structures
                         com.example.searchengine.Crawler.Entities.Document childDoc = new com.example.searchengine.Crawler.Entities.Document();
                         childDoc.setUrl(finalUrl);
                         childDoc.setStatus("to_visit");
@@ -447,16 +376,19 @@ public class CrawlerMainProcess {
             System.err.println("Error processing links from " + parentUrl + ": " + e.getMessage());
         }
                 }
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
     private void processQueue(BlockingQueue<com.example.searchengine.Crawler.Entities.Document> queue,
                              ConcurrentHashMap<String, com.example.searchengine.Crawler.Entities.Document> visitedUrls) {
-        while (!queue.isEmpty() && !Thread.currentThread().isInterrupted() && !stopFlag) {
-                if (count.get() >= MAX_DOCUMENTS) {
+        while (!queue.isEmpty() && !Thread.currentThread().isInterrupted() && !stopFlag) {// process queue to pull the top document
+                if (count.get() >= MAX_DOCUMENTS) {//close if reaches the MAX_DOCUMENTS
                 close();
                 return;
             }
             
-            com.example.searchengine.Crawler.Entities.Document docElement = queue.poll();
+            com.example.searchengine.Crawler.Entities.Document docElement = queue.poll();//get the next link in the queue
             if (docElement == null) continue;
             
             String currentUrl = docElement.getUrl();
@@ -467,7 +399,7 @@ public class CrawlerMainProcess {
                 continue;
             }
             
-            try {
+            try {//add the document to data base
                 Document jsoupDoc = Jsoup.connect(currentUrl)
                     .userAgent(USER_AGENT)
                     .header("Accept-Language", "*")
@@ -481,7 +413,6 @@ public class CrawlerMainProcess {
                 docElement.setContent(content);
                 docElement.setStatus("visited");
                 
-                // Save to database
                 serveDataBase.saveToDatabase(docElement);
                 int newCount = count.incrementAndGet();
                 System.out.println("Added to database: " + currentUrl + ", count: " + newCount);
@@ -490,8 +421,7 @@ public class CrawlerMainProcess {
                     close();
                     return;
                 }
-                
-                // Process links from this page
+                //recall process links to process them for every link till reach the end
                 processLinksFromPage(jsoupDoc, currentUrl, docElement, queue, visitedUrls);
             } catch (Exception e) {
                 System.out.println("Error crawling " + currentUrl + ": " + e.getMessage());
@@ -499,7 +429,7 @@ public class CrawlerMainProcess {
         }
     }
 
-    public void close() {
+    public void close() {// close function to interrupt all threads when reach the limit
             stopFlag = true;
         isRunning = false;
         System.out.println("Crawler is stopping...");
@@ -510,7 +440,7 @@ public class CrawlerMainProcess {
         }
     }
 
-    public String normalizeURL(String url) {
+    public String normalizeURL(String url) {//this is a string handling function to normalize links
         try {
             URL url_obj = URI.create(url).toURL();
             // Check if the URL is valid and not already processed
@@ -519,25 +449,25 @@ public class CrawlerMainProcess {
                 return null;
             }
 
-            String protocol = url_obj.getProtocol().toLowerCase();
+            String protocol = url_obj.getProtocol().toLowerCase();//lowercase all link and get all uri parameters
             String token = url_obj.getHost().toLowerCase();
-            String portPart = (url_obj.getPort() == -1 || protocol.equals("https") || protocol.equals("http")) ? "" : ":" + url_obj.getPort();
+            String portPart = (url_obj.getPort() == -1 || protocol.equals("https") || protocol.equals("http")) ? "" : ":" + url_obj.getPort();//discard default ports
             String path = url_obj.getPath() == null ? "" : url_obj.getPath().toLowerCase();
             String query = url_obj.getQuery() == null ? "" : url_obj.getQuery();
             String fragment = url_obj.getRef() == null ? "" : "#" + url_obj.getRef();
             // edit path
             String editedpath = path;
-            editedpath = editedpath.replaceAll("%2e", ".");
+            editedpath = editedpath.replaceAll("%2e", ".");//interpret the values %2e and %2f to process path
             editedpath = editedpath.replaceAll("%2f", "/");
 
-            editedpath = editedpath.replaceAll("/[^/]+/\\.\\./", "/");
-            editedpath = editedpath.replaceAll("/\\.", "");
-            editedpath = editedpath.replaceAll("/{2,}", "/");
-            if (!path.equals("/") && path.endsWith("/")) {
+            editedpath = editedpath.replaceAll("/[^/]+/\\.\\./", "/");//replace all /.. to remove it and remove the past directory
+            editedpath = editedpath.replaceAll("/\\.", "");//discard it
+            editedpath = editedpath.replaceAll("/{2,}", "/");// remove repeatness of //
+            if (!path.equals("/") && path.endsWith("/")) {// remove the last /
                 editedpath = editedpath.substring(0, editedpath.length() - 1);
                 editedpath = editedpath.replaceAll("/+$", "/");
             }
-            urlString = urlString.replace(path, editedpath);
+            urlString = urlString.replace(path, editedpath);//allow the changees over the first link
             
             // Replace host with normalized token and handle port
             String hostPort = url_obj.getHost();
@@ -549,7 +479,7 @@ public class CrawlerMainProcess {
             urlString = urlString.replace(hostPort, normalizedHostPort);
             
             // edit query
-            StringBuilder editedquery = new StringBuilder();
+            StringBuilder editedquery = new StringBuilder();//sort queries and encode the undefined symbols
             String[] params = query.split("&");
             Arrays.sort(params);
 
@@ -572,7 +502,7 @@ public class CrawlerMainProcess {
             }
             urlString = urlString.replace(query, editedquery.toString());
             urlString = urlString.replace(fragment, "");
-            if (!urlString.isEmpty() && (urlString.endsWith("/") || urlString.endsWith("\\")))
+            if (!urlString.isEmpty() && (urlString.endsWith("/") || urlString.endsWith("\\")))//remove last /
             {
                 urlString = urlString.substring(0, urlString.length() - 1);
             }
@@ -582,7 +512,7 @@ public class CrawlerMainProcess {
         }
     }
 
-    public Map<Long, Map<Long, Integer>> relationBetweenDocs() {
+    public Map<Long, Map<Long, Integer>> relationBetweenDocs() {// function to return map used in ranker
         // Return cached result if available
         if (cachedRelationMap != null) {
             System.out.println("Using cached relationship map");
@@ -641,7 +571,7 @@ public class CrawlerMainProcess {
      * Creates a sparse matrix representation of document relationships
      * This is much more memory efficient than a full matrix for large document sets
      */
-    public int[][] relationMatrix() {
+    public int[][] relationMatrix() {//convert the map to a matrix
         // Return cached result if available
         if (cachedRelationMatrix != null) {
             System.out.println("Using cached relationship matrix");
@@ -711,80 +641,6 @@ public class CrawlerMainProcess {
         cachedRelationMatrix = null;
         System.out.println("Relationship cache cleared");
     }
-
-    /**
-     * Reset database and start a fresh crawl
-     * @param thread_num Number of crawler threads to use
-     * @return Response indicating operation status
-     */
-    @PostMapping("/reset-and-crawl")
-    public Map<String, Object> resetDatabaseAndCrawl(@RequestParam(required = true, defaultValue = "4") int thread_num) {
-        Map<String, Object> response = new HashMap<>();
-        
-        if (isRunning) {
-            response.put("status", "error");
-            response.put("message", "Cannot reset database while crawler is running. Stop the crawler first.");
-            return response;
-        }
-        
-        try {
-            // Count how many documents we'll delete
-            long documentCount = documentsRepository.count();
-            long relationshipCount = relatedLinksRepository.count();
-            
-            // Reset the database - delete all documents and relationships
-            System.out.println("Deleting all documents and relationships from database...");
-            relatedLinksRepository.deleteAll();
-            documentsRepository.deleteAll();
-            
-            // Clear caches
-            cachedRelationMap = null;
-            cachedRelationMatrix = null;
-            
-            response.put("status", "success");
-            response.put("deletedDocuments", documentCount);
-            response.put("deletedRelationships", relationshipCount);
-            response.put("message", "Database reset successfully. Starting fresh crawl.");
-            
-            // Reset counters for fresh crawl
-            count.set(0);
-            stopFlag = false;
-            isRunning = true;
-            startTime = System.currentTimeMillis();
-            
-            // Start crawling with specified number of threads
-            threads = new Thread[thread_num];
-            for (int i = 0; i < thread_num; i++) {
-                final int threadId = i;
-                threads[i] = new Thread(() -> {
-                    try {
-                        crawl();
-                    } catch (Exception e) {
-                        System.err.println("Error in crawler thread " + threadId + ": " + e.getMessage());
-                        e.printStackTrace();
-                    } finally {
-                        if (getActiveThreadCount() == 0) {
-                            isRunning = false;
-                        }
-                    }
-                });
-                threads[i].setDaemon(true);
-                threads[i].start();
-            }
-            
-            response.put("crawlStatus", "Started with " + thread_num + " threads");
-            
-        } catch (Exception e) {
-            response.put("status", "error");
-            response.put("message", "Error resetting database: " + e.getMessage());
-        }
-        
-        return response;
-    }
-    
-    /**
-     * Stop the crawler if it's running
-     */
     @PostMapping("/stop")
     public Map<String, Object> stopCrawler() {
         Map<String, Object> response = new HashMap<>();
@@ -811,21 +667,6 @@ public class CrawlerMainProcess {
     private void displayProgress(String message) {
         System.out.println(message);
     }
-
-    // Replace all ProgressBarUtil.startProgress calls with displayProgress
-    // Replace all ProgressBarUtil.completeProgress calls with displayProgress
-    // Replace all ProgressBarUtil.displayProgressBar calls with simple console output
-    // Replace all DocumentRelationshipUtil.displayRelationships calls with simple console output
-    // For example:
-    // ProgressBarUtil.startProgress("Loading document relationships...") becomes displayProgress("Loading document relationships...")
-
-    /**
-     * Calculate how frequently to update the progress bar
-     * 
-     * @param total Total number of items
-     * @param percentInterval How often to update (in percent intervals)
-     * @return Number of items between updates
-     */
     private int getUpdateFrequency(int total, int percentInterval) {
         if (total <= 0 || percentInterval <= 0 || percentInterval > 100) {
             return 1;
@@ -837,14 +678,6 @@ public class CrawlerMainProcess {
         // Return items per update interval
         return Math.max(1, itemsPerPercent * percentInterval);
     }
-    
-    /**
-     * Display statistics about document relationships
-     * 
-     * @param relationMap Map of document relationships
-     * @param topParents Number of top parents to display
-     * @param topChildren Number of top children per parent to display
-     */
     private void displayRelationships(Map<Long, Map<Long, Integer>> relationMap, int topParents, int topChildren) {
         if (relationMap == null || relationMap.isEmpty()) {
             System.out.println("No document relationships to display.");

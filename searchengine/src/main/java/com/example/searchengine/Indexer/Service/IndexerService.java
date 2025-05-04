@@ -10,19 +10,19 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Element;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.scheduling.annotation.Async;
-import org.springframework.dao.DataIntegrityViolationException;
 
 import com.example.searchengine.Crawler.Entities.Document;
 import com.example.searchengine.Crawler.Repository.DocumentRepository;
@@ -35,8 +35,8 @@ import com.example.searchengine.Indexer.Repository.InvertedIndexRepository;
 import com.example.searchengine.Indexer.Repository.WordDocumentMetricsRepository;
 import com.example.searchengine.Indexer.Repository.WordDocumentTagRepository;
 import com.example.searchengine.Indexer.Repository.WordIdfRepository;
-import com.example.searchengine.Indexer.Repository.WordRepository;
 import com.example.searchengine.Indexer.Repository.WordPositionRepository;
+import com.example.searchengine.Indexer.Repository.WordRepository;
 
 @Service
 public class IndexerService {

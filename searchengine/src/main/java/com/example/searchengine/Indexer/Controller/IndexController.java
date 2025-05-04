@@ -1,26 +1,27 @@
 package com.example.searchengine.Indexer.Controller;
 
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
 import com.example.searchengine.Crawler.Entities.Document;
 import com.example.searchengine.Crawler.Repository.DocumentRepository;
 import com.example.searchengine.Indexer.Entities.Word;
 import com.example.searchengine.Indexer.Repository.WordRepository;
 import com.example.searchengine.Indexer.Service.IndexerService;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.domain.PageRequest;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
-
-import java.util.List;
-import java.util.Map;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import java.util.HashMap;
-import org.springframework.data.domain.Page;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.CrossOrigin;
-import java.util.concurrent.atomic.AtomicInteger;
 
 @RestController
 @RequestMapping("/api/indexer")
@@ -201,7 +202,7 @@ public class IndexController {
      * This should be called after indexing a significant number of new documents
      */
     @PostMapping("/compute-metrics")
-    public ResponseEntity<Map<String, Object>> computeMetrics() {
+    public ResponseEntity<Map<String, Object>> computeMetrics() {// a function 
         Map<String, Object> response = new HashMap<>();
         
         try {
