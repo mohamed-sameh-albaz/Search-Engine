@@ -1,13 +1,19 @@
 package com.example.searchengine;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import io.github.cdimascio.dotenv.Dotenv;
-import jakarta.transaction.Transactional;
 import org.springframework.context.annotation.Bean;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 import org.springframework.web.filter.CorsFilter;
+
+import com.example.searchengine.Indexer.Service.DatabaseMaintenanceService;
+
 import java.util.Arrays;
 import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.scheduling.annotation.EnableScheduling;
@@ -17,6 +23,10 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @EnableAsync
 public class SearchengineApplication implements CommandLineRunner {
 
+    private static final Logger logger = LoggerFactory.getLogger(SearchengineApplication.class);
+    
+    @Autowired
+    private DatabaseMaintenanceService maintenanceService;
 
     public static void main(String[] args) {
         Dotenv dotenv = Dotenv.configure()
@@ -29,52 +39,21 @@ public class SearchengineApplication implements CommandLineRunner {
     }
 
     @Override
-    @Transactional
     public void run(String... args) throws Exception {
-        System.out.println("Starting search engine initialization...");
+        logger.info("Starting search engine initialization...");
         
-        // Process documents in small batches
-        System.out.println("Processing documents in small batches to avoid out of memory errors...");
-        // Commenting out automatic indexing at startup to prevent memory issues
-        // processDocumentsInBatches();
-        System.out.println("Skipping document indexing at startup. Use /reindex endpoint to manually start indexing.");
+        // First run maintenance operations outside of transaction
+        // This is handled by the Propagation.NOT_SUPPORTED in the service
+        try {
+            maintenanceService.vacuumDatabase();
+        } catch (Exception e) {
+            logger.error("Database maintenance failed: {}", e.getMessage());
+            // Continue with startup even if vacuum fails
+        }
         
-        System.out.println("Search engine initialization complete!");
-        System.out.println("Search engine ready for use.");
+        logger.info("Search engine initialization complete!");
+        logger.info("Search engine ready for use.");
     }
-
-    /**
-     * Process documents in small batches to avoid memory issues.
-     * Commented out by default - use the /reindex endpoint instead.
-     */
-    // private void processDocumentsInBatches() {
-    //     int pageSize = 20;
-    //     int page = 0;
-    //     boolean hasMore = true;
-    //     
-    //     while (hasMore) {
-    //         Page<Document> documentPage = documentRepository.findAll(PageRequest.of(page, pageSize));
-    //         if (documentPage.isEmpty()) {
-    //             hasMore = false;
-    //             continue;
-    //         }
-    //         
-    //         Map<String, String> batchToIndex = new HashMap<>();
-    //         documentPage.forEach(doc -> {
-    //             if (doc.getUrl() != null && doc.getContent() != null) {
-    //                 batchToIndex.put(doc.getUrl(), doc.getContent());
-    //             }
-    //         });
-    //         
-    //         if (!batchToIndex.isEmpty()) {
-    //             indexerService.buildIndex(batchToIndex);
-    //         }
-    //         
-    //         batchToIndex.clear();
-    //         page++;
-    //         System.gc(); // Suggest garbage collection
-    //     }
-    // }
 
     @Bean
     public CorsFilter corsFilter() {
