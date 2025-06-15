@@ -1,42 +1,32 @@
 package com.example.searchengine;
 
-import com.example.searchengine.Crawler.Entities.Document;
-
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
-import org.springframework.core.env.Environment;
-import org.springframework.data.domain.PageRequest;
-import org.springframework.jdbc.core.JdbcTemplate;
-
-import com.example.searchengine.Crawler.Repository.DocumentRepository;
-import com.example.searchengine.Indexer.Service.DatabaseMaintenanceService;
-import com.example.searchengine.Indexer.Service.IndexerService;
-import com.example.searchengine.Indexer.Service.PreIndexer;
-
-import javax.sql.DataSource;
-import java.util.HashMap;
-import java.util.Map;
-
-import org.springframework.data.domain.Page;
 import io.github.cdimascio.dotenv.Dotenv;
-import jakarta.transaction.Transactional;
+import org.springframework.context.annotation.Bean;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+import org.springframework.web.filter.CorsFilter;
+
+import com.example.searchengine.Indexer.Service.DatabaseMaintenanceService;
+
+import java.util.Arrays;
+import org.springframework.scheduling.annotation.EnableAsync;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 @SpringBootApplication
+@EnableScheduling
+@EnableAsync
 public class SearchengineApplication implements CommandLineRunner {
 
-    @Autowired
-    private IndexerService indexerService;
-
+    private static final Logger logger = LoggerFactory.getLogger(SearchengineApplication.class);
+    
     @Autowired
     private DatabaseMaintenanceService maintenanceService;
-
-    @Autowired
-    private DocumentRepository documentRepository;
-
-    @Autowired
-    private PreIndexer preIndexer;
 
     public static void main(String[] args) {
         Dotenv dotenv = Dotenv.configure()
@@ -49,37 +39,35 @@ public class SearchengineApplication implements CommandLineRunner {
     }
 
     @Override
-    @Transactional
     public void run(String... args) throws Exception {
-        Map<String, String> documentsToIndex = fetchDocumentsForIndexing();
-        // maintenanceService.vacuumDatabase();
-        if (!documentsToIndex.isEmpty()) {
-            System.out.println("Re-indexing " + documentsToIndex.size() + "documents...");
-            // indexerService.buildIndex(documentsToIndex);
-        } else {
-            System.out.println("No documents found to re-index.");
+        logger.info("Starting search engine initialization...");
+        
+        // First run maintenance operations outside of transaction
+        // This is handled by the Propagation.NOT_SUPPORTED in the service
+        try {
+            maintenanceService.vacuumDatabase();
+        } catch (Exception e) {
+            logger.error("Database maintenance failed: {}", e.getMessage());
+            // Continue with startup even if vacuum fails
         }
+        
+        logger.info("Search engine initialization complete!");
+        logger.info("Search engine ready for use.");
     }
 
-    private Map<String, String> fetchDocumentsForIndexing() {
-        Map<String, String> documentsToIndex = new HashMap<>();
-        int pageSize = 20;
-        int page = 0;
-        boolean hasMore = true;
-
-        // while (hasMore) {
-        Page<Document> documentPage = documentRepository.findAll(PageRequest.of(page,
-                pageSize));
-        for (Document doc : documentPage.getContent()) {
-            if (doc.getUrl() != null && doc.getContent() != null) {
-                documentsToIndex.put(doc.getUrl(), doc.getContent());
-            }
-        }
-        hasMore = documentPage.hasNext();
-        page++;
-        System.out.println(documentsToIndex.size());
-        // }
-
-        return documentsToIndex;
+    @Bean
+    public CorsFilter corsFilter() {
+        CorsConfiguration corsConfiguration = new CorsConfiguration();
+        corsConfiguration.setAllowCredentials(true);
+        corsConfiguration.setAllowedOrigins(Arrays.asList("http://localhost:3000"));
+        corsConfiguration.setAllowedHeaders(Arrays.asList("Origin", "Access-Control-Allow-Origin", "Content-Type",
+                "Accept", "Authorization", "Origin, Accept", "X-Requested-With",
+                "Access-Control-Request-Method", "Access-Control-Request-Headers"));
+        corsConfiguration.setExposedHeaders(Arrays.asList("Origin", "Content-Type", "Accept", "Authorization",
+                "Access-Control-Allow-Origin", "Access-Control-Allow-Origin", "Access-Control-Allow-Credentials"));
+        corsConfiguration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS"));
+        UrlBasedCorsConfigurationSource urlBasedCorsConfigurationSource = new UrlBasedCorsConfigurationSource();
+        urlBasedCorsConfigurationSource.registerCorsConfiguration("/**", corsConfiguration);
+        return new CorsFilter(urlBasedCorsConfigurationSource);
     }
 }

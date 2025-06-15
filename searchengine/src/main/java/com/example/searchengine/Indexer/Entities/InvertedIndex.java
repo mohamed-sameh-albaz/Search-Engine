@@ -29,4 +29,10 @@ public class InvertedIndex {
 
     @Column(nullable = false)
     private Integer frequency;
+    
+    @Column(name = "tf", nullable = false)
+    private Double tf = 0.0;
+    
+    @Column(name = "importance", nullable = false)
+    private Integer importance = 1;
 }

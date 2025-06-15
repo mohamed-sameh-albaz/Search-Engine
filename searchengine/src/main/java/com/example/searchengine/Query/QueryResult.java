@@ -1,27 +1,43 @@
 package com.example.searchengine.Query;
 
-import java.util.List;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 public class QueryResult {
-    private List<String> words = new ArrayList<>();
-    private List<String> phrases = new ArrayList<>();
-    private List<String> stemmedWords = new ArrayList<>();
-    
-    public List<String> getWords() {
-        return words;
+    private String originalQuery;
+    private boolean isPhraseQuery;
+    private List<String> stemmedWords;
+    private List<String> phrases;
+    private Map<String, List<Long>> matchingDocuments;
+    private List<Map<String, Object>> results;
+    private String errorMessage;
+    private String operator;
+    private List<String> suggestedQueries;
+
+    public QueryResult() {
+        this.stemmedWords = new ArrayList<>();
+        this.phrases = new ArrayList<>();
+        this.matchingDocuments = new HashMap<>();
+        this.results = new ArrayList<>();
+        this.suggestedQueries = new ArrayList<>();
+    }
+
+    public String getOriginalQuery() {
+        return originalQuery;
     }
     
-    public void setWords(List<String> words) {
-        this.words = words;
+    public void setOriginalQuery(String originalQuery) {
+        this.originalQuery = originalQuery;
     }
     
-    public List<String> getPhrases() {
-        return phrases;
+    public boolean isPhraseQuery() {
+        return isPhraseQuery;
     }
     
-    public void setPhrases(List<String> phrases) {
-        this.phrases = phrases;
+    public void setPhraseQuery(boolean phraseQuery) {
+        isPhraseQuery = phraseQuery;
     }
     
     public List<String> getStemmedWords() {
@@ -32,23 +48,92 @@ public class QueryResult {
         this.stemmedWords = stemmedWords;
     }
     
-    @Override
-    public String toString() {
-        StringBuilder sb = new StringBuilder();
-        sb.append("Query Result:\n");
+    public List<String> getPhrases() {
+        return phrases;
+    }
+
+    public void setPhrases(List<String> phrases) {
+        this.phrases = phrases;
+    }
+
+    public Map<String, List<Long>> getMatchingDocuments() {
+        return matchingDocuments;
+    }
+
+    public void setMatchingDocuments(Map<String, List<Long>> matchingDocuments) {
+        this.matchingDocuments = matchingDocuments;
+    }
+
+    public List<Map<String, Object>> getResults() {
+        return results;
+    }
+
+    public void setResults(List<Map<String, Object>> results) {
+        this.results = results;
+    }
+
+    public String getErrorMessage() {
+        return errorMessage;
+    }
+
+    public void setErrorMessage(String errorMessage) {
+        this.errorMessage = errorMessage;
+    }
+
+    public String getOperator() {
+        return operator;
+    }
+
+    public void setOperator(String operator) {
+        this.operator = operator;
+    }
+
+    public int getTotalResults() {
+        return results != null ? results.size() : 0;
+    }
+
+    public String getResultsAsString() {
+        StringBuilder builder = new StringBuilder();
         
-        if (words != null && !words.isEmpty()) {
-            sb.append("Words: ").append(String.join(", ", words)).append("\n");
+        builder.append("Query: ").append(originalQuery).append("\n");
+        
+        if (operator != null && !operator.isEmpty()) {
+            builder.append("Operator: ").append(operator).append("\n");
         }
         
-        if (stemmedWords != null && !stemmedWords.isEmpty()) {
-            sb.append("Stemmed Words: ").append(String.join(", ", stemmedWords)).append("\n");
+        builder.append("Processed as ");
+        if (isPhraseQuery) {
+            builder.append("phrase query");
+        } else {
+            builder.append("regular query");
+        }
+        builder.append("\n");
+        
+        if (!phrases.isEmpty()) {
+            builder.append("Phrase: [").append(String.join(", ", phrases)).append("]\n");
         }
         
-        if (phrases != null && !phrases.isEmpty()) {
-            sb.append("Phrases: ").append(String.join(", ", phrases)).append("\n");
+        if (!stemmedWords.isEmpty()) {
+            builder.append("Stemmed: [").append(String.join(", ", stemmedWords)).append("]\n");
         }
         
-        return sb.toString();
+        builder.append("Total results: ").append(getTotalResults()).append("\n\n");
+        
+        for (Map<String, Object> result : results) {
+            builder.append("Title: ").append(result.get("title")).append("\n");
+            builder.append("URL: ").append(result.get("url")).append("\n");
+            builder.append("Score: ").append(result.get("score")).append("\n");
+            builder.append("Snippet: ").append(result.get("snippet")).append("\n\n");
+        }
+        
+        return builder.toString();
+    }
+
+    public List<String> getSuggestedQueries() {
+        return suggestedQueries;
+    }
+    
+    public void setSuggestedQueries(List<String> suggestedQueries) {
+        this.suggestedQueries = suggestedQueries;
     }
 } 

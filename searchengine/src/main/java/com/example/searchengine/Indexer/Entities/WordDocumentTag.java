@@ -32,4 +32,13 @@ public class WordDocumentTag {
 
     @Column(nullable = false)
     private String tag;
+    
+    @Column(name = "paragraph_index")
+    private Integer paragraphIndex;
+    
+    @Column(name = "word_index")
+    private Integer wordIndex;
+    
+    @Column(name = "original_word")
+    private String originalWord;
 }
